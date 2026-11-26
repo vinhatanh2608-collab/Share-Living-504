@@ -1,0 +1,8 @@
+**
+!Dockerfile
+!requirements.txt
+!app/
+!app/**/
+!app/**/*.py
+!scripts/
+!scripts/seed.py

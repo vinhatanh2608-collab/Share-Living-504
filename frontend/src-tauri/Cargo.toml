@@ -1,0 +1,20 @@
+[package]
+name = "dormitory-desktop"
+version = "2.0.0"
+description = "Personal spending, household expenses, and group chat"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "dormitory_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-http = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
