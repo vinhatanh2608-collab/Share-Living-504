@@ -5,14 +5,16 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import type { Ticket } from "../types/api";
 import { safeDisplayUrl } from "./safeUrl";
 
-export const baseUrl = (import.meta.env.VITE_API_URL?.trim() || "http://127.0.0.1:8000/api/v1").replace(/\/+$/, "");
+const webOrigin = typeof window !== "undefined" && /^https?:$/.test(window.location.protocol)
+  ? window.location.origin : "http://127.0.0.1:8000";
+export const baseUrl = ((import.meta.env.VITE_PUBLIC_PROXY === "1" ? "" : import.meta.env.VITE_API_URL?.trim()) || `${isTauri() ? "http://127.0.0.1:8000" : webOrigin}/api/v1`).replace(/\/+$/, "");
 function defaultWsUrl() {
   const url = new URL("/ws", baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.href;
 }
 export function realtimeUrl() {
-  return import.meta.env.VITE_WS_URL?.trim() || defaultWsUrl();
+  return (import.meta.env.VITE_PUBLIC_PROXY === "1" ? "" : import.meta.env.VITE_WS_URL?.trim()) || defaultWsUrl();
 }
 let access: string | null = null;
 let unauthorized = () => {};
@@ -88,6 +90,11 @@ function safeObjectUrl(value: string) {
   const storage = new URL(import.meta.env.VITE_STORAGE_URL?.trim() || "http://127.0.0.1:9000");
   if (!url || url.origin !== storage.origin || !url.pathname.startsWith(storage.pathname.replace(/\/+$/, "") + "/"))
     throw new Error("Untrusted file URL.");
+  if (import.meta.env.VITE_PUBLIC_PROXY === "1" && url.origin === "http://127.0.0.1:9000") {
+    const capability = /^#proxy=(\d+\.[a-f0-9]{64})$/.exec(url.hash)?.[1];
+    if (!capability) throw new Error("H?y m? l?i bi?n lai ?? l?y li?n k?t m?i.");
+    return `${webOrigin}/__receipt_storage/${capability}${url.pathname}${url.search}`;
+  }
   return url.href;
 }
 export async function upload(ticket: Ticket, file: Blob) {

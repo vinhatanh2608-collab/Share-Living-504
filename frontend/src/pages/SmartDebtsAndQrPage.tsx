@@ -166,6 +166,10 @@ function Payment({ groupId, selection, close, reload }: {
         }}><ImagePlus aria-hidden="true"/> Kéo thả hoặc chọn ảnh biên lai
           <small>JPG, PNG hoặc WebP · Tối đa 5 MB</small>
           <input type="file" accept="image/jpeg,image/png,image/webp" disabled={action.busy} onChange={event => selectFile(event.target.files?.[0])}/></label>
+        <label>Chụp ảnh biên lai
+          <input type="file" accept="image/*" capture="environment" disabled={action.busy}
+            onChange={event => selectFile(event.target.files?.[0])} />
+        </label>
         {preview && <img className="living-receipt" src={preview} alt="Xem trước biên lai"/>}
         <label>Ghi chú (không bắt buộc)<textarea maxLength={300} disabled={action.busy} value={note} onChange={event => setNote(event.target.value)}/></label>
         {(validation || action.error) && <p className="error" role="alert">{validation || action.error}</p>}

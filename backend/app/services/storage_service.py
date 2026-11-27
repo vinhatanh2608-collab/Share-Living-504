@@ -1,3 +1,6 @@
+import hmac
+import time
+from urllib.parse import urlsplit
 from functools import lru_cache
 from io import BytesIO
 from uuid import UUID, uuid4
@@ -120,11 +123,23 @@ def client(public=False):
                       connect_timeout=3, read_timeout=5, retries={"total_max_attempts": 2}))
 
 
+def receipt_proxy_key():
+    return hmac.digest(settings().jwt_secret.get_secret_value().encode(), b"receipt-proxy-v1", "sha256").hex()
+
+
 async def presign(operation, parameters, ttl=300):
     try:
-        return await storage_call(
+        url = await storage_call(
             lambda: client(True).generate_presigned_url(
                 operation, Params={"Bucket": settings().s3_bucket, **parameters}, ExpiresIn=ttl))
+        parsed = urlsplit(url)
+        if parsed.netloc == "127.0.0.1:9000":
+            expires = int(time.time()) + ttl
+            method = "PUT" if operation == "put_object" else "GET"
+            signed = f"{method} {parsed.path}?{parsed.query} {expires}"
+            signature = hmac.digest(receipt_proxy_key().encode(), signed.encode(), "sha256").hex()
+            return f"{url}#proxy={expires}.{signature}"
+        return url
     except (BotoCoreError, ClientError) as exc:
         logger.exception("Object storage signing failed")
         raise HTTPException(503, "Object storage unavailable") from exc

@@ -1,4 +1,7 @@
-﻿import csv
+﻿import asyncio
+import csv
+import logging
+import subprocess
 from datetime import datetime, timedelta, timezone
 from io import BytesIO, StringIO
 from typing import Annotated, Literal
@@ -8,7 +11,9 @@ from sqlalchemy import select
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, StrictBool
 
-from .deps import Actor
+from scripts import backup_db
+
+from .deps import Actor, is_owner
 from .routes_living import approved_member
 from .routes_group_finance import fund_balance
 from ..models.living import GroupExpense, GroupFundTransaction, LivingGroup
@@ -16,7 +21,8 @@ from ..models.mysql_models import User
 from ..services.debt_simplifier import simplify_group
 from ..services.monthly_reminders import LOCAL, project_monthly, queue_month
 
-router = APIRouter(prefix="/groups/{group_id}", tags=["group-reminders"])
+logger = logging.getLogger(__name__)
+router = APIRouter(tags=["group-reminders"])
 
 
 class ReminderSettings(BaseModel):
@@ -31,7 +37,7 @@ async def owner_group(sql, group_id, actor_id):
     return group
 
 
-@router.patch("/reminder-settings")
+@router.patch("/groups/{group_id}/reminder-settings")
 async def reminder_settings(group_id: int, data: ReminderSettings, request: Request, actor: Actor):
     async with request.app.state.resources.sql.begin() as sql:
         group = await owner_group(sql, group_id, actor.id)
@@ -40,7 +46,7 @@ async def reminder_settings(group_id: int, data: ReminderSettings, request: Requ
                 "last_reminded_period": group.last_reminded_period}
 
 
-@router.post("/reminders/run-monthly")
+@router.post("/groups/{group_id}/reminders/run-monthly")
 async def run_monthly(group_id: int, request: Request, actor: Actor):
     resources = request.app.state.resources
     async with resources.sql.begin() as sql:
@@ -50,7 +56,7 @@ async def run_monthly(group_id: int, request: Request, actor: Actor):
         await project_monthly(resources, request.app.state.ws, (group_id, result["period"]))
     return result
 
-@router.get("/monthly-report/export")
+@router.get("/groups/{group_id}/monthly-report/export")
 async def export_report(group_id: int, request: Request, actor: Actor,
                         period: Annotated[str, Query(pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$")],
                         format: Literal["xlsx", "csv"] = "xlsx"):
@@ -113,3 +119,21 @@ async def export_report(group_id: int, request: Request, actor: Actor,
         "Content-Disposition": f'attachment; filename="quyet-toan-{group_id}-{period}.{format}"',
         "Cache-Control": "no-store",
     })
+
+
+@router.get("/system/backups")
+async def list_backups(actor: Actor):
+    if not is_owner(actor):
+        raise HTTPException(403, "Server owner required")
+    return await asyncio.to_thread(backup_db.archives)
+
+
+@router.post("/system/backups/run", status_code=201)
+async def run_backup(actor: Actor):
+    if not is_owner(actor):
+        raise HTTPException(403, "Server owner required")
+    try:
+        return await asyncio.to_thread(backup_db.create_backup)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        logger.warning("Manual database backup failed (%s)", type(exc).__name__)
+        raise HTTPException(503, "Backup unavailable. Check the server log.") from None

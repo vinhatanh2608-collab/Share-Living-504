@@ -1,5 +1,6 @@
 import asyncio
 import httpx
+from scripts.backup_db import backup_forever
 from .core.circuit_breaker import CircuitBreaker
 from .services.storage_service import client as storage_client
 from contextlib import asynccontextmanager, suppress
@@ -33,6 +34,7 @@ async def lifespan(app):
     resources = Resources()
     task = None
     monthly_task = None
+    backup_task = None
     try:
         await resources.initialize_schema()
         await resources.mongo.command("ping")
@@ -53,6 +55,7 @@ async def lifespan(app):
                                    if app.state.legacy_room else routes_group_chat.project_forever(resources, app.state.ws))
         if not app.state.legacy_room:
             monthly_task = asyncio.create_task(monthly_forever(resources, app.state.ws))
+        backup_task = asyncio.create_task(backup_forever())
         async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=3, write=5, pool=3),
                                      limits=httpx.Limits(max_connections=10), trust_env=False) as http:
             app.state.http = http
@@ -61,6 +64,10 @@ async def lifespan(app):
             storage_client(True)
             yield
     finally:
+        if backup_task:
+            backup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await backup_task
         if monthly_task:
             monthly_task.cancel()
             with suppress(asyncio.CancelledError):
