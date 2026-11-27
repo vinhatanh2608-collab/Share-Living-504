@@ -1,3 +1,6 @@
+from threading import Lock
+
+from pymongo.monitoring import ConnectionPoolListener
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -16,15 +19,48 @@ def initialize_mysql_schema(connection):
             index.create(connection)
 
 
+class MongoPoolMetrics(ConnectionPoolListener):
+    def __init__(self):
+        self.lock = Lock()
+        self.checked_out = 0
+        self.checkout_failures = 0
+
+    def connection_checked_out(self, event):
+        with self.lock:
+            self.checked_out += 1
+
+    def connection_checked_in(self, event):
+        with self.lock:
+            self.checked_out -= 1
+
+    def connection_check_out_failed(self, event):
+        with self.lock:
+            self.checkout_failures += 1
+
+    def snapshot(self):
+        with self.lock:
+            return {"checked_out": self.checked_out, "capacity_per_server": 20,
+                    "checkout_failures": self.checkout_failures}
+
+    # PyMongo requires listeners to implement all pool event callbacks.
+    def ignore(self, event):
+        pass
+
+    pool_created = pool_ready = pool_cleared = pool_closed = ignore
+    connection_created = connection_ready = connection_closed = connection_check_out_started = ignore
+
+
 class Resources:
     def __init__(self):
         cfg = settings()
         self.engine = create_async_engine(cfg.mysql_url, pool_pre_ping=True,
-                                          pool_recycle=900, pool_size=5, max_overflow=5,
+                                          pool_recycle=1800, pool_size=10, max_overflow=15, pool_timeout=5,
                                           hide_parameters=True)
         self.sql = async_sessionmaker(self.engine, expire_on_commit=False)
-        self.mongo_client = AsyncIOMotorClient(cfg.mongo_url, serverSelectionTimeoutMS=4000,
-                                              socketTimeoutMS=6000, tz_aware=True)
+        self.mongo_pool = MongoPoolMetrics()
+        self.mongo_client = AsyncIOMotorClient(cfg.mongo_url, maxPoolSize=20, minPoolSize=2, maxIdleTimeMS=30000, waitQueueTimeoutMS=5000, serverSelectionTimeoutMS=5000,
+                                              socketTimeoutMS=10000, connectTimeoutMS=3000, tz_aware=True,
+                                              event_listeners=[self.mongo_pool])
         self.mongo = self.mongo_client[cfg.mongo_database]
 
     async def initialize_schema(self):

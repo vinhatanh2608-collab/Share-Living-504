@@ -3,6 +3,7 @@ import type { Debt, Ticket } from "../types/api";
 import { api, explain, upload } from "../lib/api";
 import { money } from "../lib/format";
 import { compressReceipt } from "../lib/imageCompress";
+import { vietQrUrl } from "../lib/safeUrl";
 import Modal from "./Modal";
 
 export default function SubmitProofModal({ debts, close, done }: { debts: Debt[]; close: () => void; done: () => void }) {
@@ -15,9 +16,9 @@ export default function SubmitProofModal({ debts, close, done }: { debts: Debt[]
     const cont = new AbortController();
     for (const debt of debts) void api.get<{url: string}>(`/finance/debts/${debt.id}/vietqr`, { signal: cont.signal })
       .then(r => {
-        const parsed = new URL(r.data.url);
-        if (parsed.origin !== "https://img.vietqr.io") throw new Error("Unexpected QR provider");
-        if (!cont.signal.aborted) setQr(all => ({ ...all, [debt.id]: parsed.href }));
+        const url = vietQrUrl(r.data.url);
+        if (!url) throw new Error("Unexpected QR provider");
+        if (!cont.signal.aborted) setQr(all => ({ ...all, [debt.id]: url }));
       }).catch(() => { if (!cont.signal.aborted) setQr(all => ({ ...all, [debt.id]: "" })); });
     return () => cont.abort();
   }, [debts]);

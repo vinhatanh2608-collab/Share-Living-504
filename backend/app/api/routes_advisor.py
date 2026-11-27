@@ -162,7 +162,7 @@ async def advisor_message(data: Prompt, request: Request, actor: Actor):
         snapshot = await summarize(sql, actor.id, "month", "combined", include_personal_categories=True)
     personal = snapshot.pop("personal_categories")
     text, actions = local_reply(snapshot, personal)
-    external = await provider_reply(data.text, snapshot) if data.use_external else None
+    external = await provider_reply(data.text, snapshot, request.app.state.http, request.app.state.advisor_breaker) if data.use_external else None
     result = {"prompt": data.text, "reply": external or text, "quick_actions": actions,
               "source": "provider" if external else "local",
               "metrics": {key: snapshot[key] for key in ("personal", "group", "overdue")}}

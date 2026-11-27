@@ -30,7 +30,7 @@ if (!(Test-Path .env)) { Copy-Item .env.example .env }
 docker compose up -d --wait
 if (!(Test-Path ..\.venv\Scripts\python.exe)) { py -3 -m venv ..\.venv }
 ..\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 --no-access-log
+..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 --no-proxy-headers --timeout-keep-alive 5 --limit-concurrency 200 --limit-max-requests 5000 --backlog 512 --no-access-log
 ```
 
 Open a second terminal for the frontend.

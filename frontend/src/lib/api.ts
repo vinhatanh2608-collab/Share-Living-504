@@ -3,6 +3,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { fetch as nativeFetch } from "@tauri-apps/plugin-http";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { Ticket } from "../types/api";
+import { safeDisplayUrl } from "./safeUrl";
 
 export const baseUrl = (import.meta.env.VITE_API_URL?.trim() || "http://127.0.0.1:8000/api/v1").replace(/\/+$/, "");
 function defaultWsUrl() {
@@ -50,9 +51,9 @@ export function explain(error: unknown) {
 }
 
 function safeObjectUrl(value: string) {
-  const url = new URL(value);
-  if (url.username || url.password || !(url.protocol === "https:" ||
-      (url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname) && url.port === "9000")))
+  const url = safeDisplayUrl(value);
+  const storage = new URL(import.meta.env.VITE_STORAGE_URL?.trim() || "http://127.0.0.1:9000");
+  if (!url || url.origin !== storage.origin || !url.pathname.startsWith(storage.pathname.replace(/\/+$/, "") + "/"))
     throw new Error("Untrusted file URL.");
   return url.href;
 }

@@ -1,0 +1,30 @@
+{
+	servers {
+		timeouts {
+			read_header 5s
+			read_body 15s
+            write 30s
+            idle 30s
+		}
+	}
+}
+
+{$API_DOMAIN} {
+	route {
+		rate_limit {
+			zone api_edge {
+				key {remote_host}
+				events 150
+				window 1m
+			}
+		}
+		request_body {
+			max_size 6MB
+		}
+		reverse_proxy 127.0.0.1:8000 {
+			header_up -CF-Connecting-IP
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+		}
+	}
+}

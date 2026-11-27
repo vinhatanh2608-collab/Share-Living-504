@@ -10,9 +10,10 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{"label":"main","title":"Shared Living","width":1200,"height":800,"minWidth":800,"minHeight":600}],
+    "windows": [{"label":"main","title":"Shared Living","width":1200,"height":800,"minWidth":800,"minHeight":600,"useHttpsScheme":true}],
     "security": {
-      "csp": "default-src 'self' ipc: http://ipc.localhost; connect-src 'self' ipc: http://ipc.localhost https: wss: http://localhost:8000 http://127.0.0.1:8000 ws://localhost:8000 ws://127.0.0.1:8000 http://localhost:9000 http://127.0.0.1:9000; img-src 'self' blob: https://img.vietqr.io; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+      "csp": "default-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost; img-src 'self' blob: https://img.vietqr.io; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "capabilities": ["desktop-main"]
     }
   },
   "bundle": {

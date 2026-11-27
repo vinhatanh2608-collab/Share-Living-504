@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { type ChatItem, type Group, useAction, useResource } from "../lib/living";
 import { ProofReview } from "./SmartDebtsAndQrPage";
+import SanitizedMessage from "../components/SanitizedMessage";
 
 export default function GroupChatPage({ group, userId, revision, reload }: {
   group: Group; userId: number; revision: number; reload: () => void;
@@ -35,7 +36,7 @@ export default function GroupChatPage({ group, userId, revision, reload }: {
       {!items.length && <p>{messages.loading ? "Loading messages…" : "No messages yet."}</p>}
       {items.map(item => <article className="living-message" key={item.id}>
         <small>{new Date(item.created_at).toLocaleString()}</small>
-        {item.kind === "TEXT" ? <><strong>{item.sender_name}</strong><p>{item.text}</p></> : <>
+        {item.kind === "TEXT" ? <><strong>{item.sender_name}</strong><SanitizedMessage text={item.text} /></> : <>
           <strong>Payment proof #{item.proof_id}</strong><p>{item.status}</p>
           {(item.creditor_id === userId || item.sender_id === userId) && <button className="secondary" onClick={() =>
             setProof({ id: item.proof_id, creditor: item.creditor_id === userId })}>Open proof</button>}

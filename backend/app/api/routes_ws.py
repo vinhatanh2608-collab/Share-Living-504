@@ -5,7 +5,6 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pymongo.errors import PyMongoError
 from sqlalchemy.exc import SQLAlchemyError
 from ..models.living import GroupMember
-from ..core.config import settings
 from .deps import authenticate
 
 router = APIRouter()
@@ -14,7 +13,7 @@ router = APIRouter()
 @router.websocket("/ws")
 async def websocket(socket: WebSocket):
     origin = socket.headers.get("origin")
-    if origin and origin not in settings().cors_origins:
+    if origin and origin not in socket.app.state.cors_origins:
         await socket.close(code=1008)
         return
     header = socket.headers.get("authorization", "")
@@ -55,8 +54,18 @@ async def websocket(socket: WebSocket):
             await asyncio.wait_for(socket.send_json(event), timeout=5)
 
     async def receiver():
+        from collections import deque
+        frames = deque()
         while True:
             event = await socket.receive()
+            if event["type"] == "websocket.receive":
+                now = time.monotonic()
+                while frames and frames[0] <= now - 10:
+                    frames.popleft()
+                if len(frames) >= 20:
+                    await socket.close(code=1008)
+                    return
+                frames.append(now)
             if event["type"] == "websocket.disconnect":
                 return
 

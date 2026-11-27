@@ -37,7 +37,6 @@ def group_view(group, member):
 
 @router.post("/auth/register", status_code=201)
 async def register(data: Register, request: Request):
-    request.app.state.auth_limiter.check(request, "register", 6)
     async with request.app.state.login_slots:
         encoded = await asyncio.to_thread(passwords.hash, data.password)
     try:

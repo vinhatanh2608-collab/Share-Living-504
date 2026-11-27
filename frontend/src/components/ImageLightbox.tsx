@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, explain, getObject, openDownload } from "../lib/api";
 import Modal from "./Modal";
+import { receiptMime } from "../lib/imageCompress";
 
 export default function ImageLightbox({ id, close }: { id: number; close: () => void }) {
   const [src, setSrc] = useState("");
@@ -16,9 +17,7 @@ export default function ImageLightbox({ id, close }: { id: number; close: () => 
         if (!active) return;
         setLink(data.url);
         const blob = await getObject(data.url);
-        const head = new Uint8Array(await blob.slice(0, 8).arrayBuffer());
-        const mime = head[0] === 255 && head[1] === 216 ? "image/jpeg" :
-          head[0] === 137 && head[1] === 80 && head[2] === 78 && head[3] === 71 ? "image/png" : "";
+        const mime = await receiptMime(blob);
         if (!mime) throw new Error("This receipt is not a previewable image. Download it to review.");
         if (active) { object = URL.createObjectURL(new Blob([blob], { type: mime })); setSrc(object); }
       } catch (e) { if (active) setError(explain(e)); }

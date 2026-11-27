@@ -1,6 +1,4 @@
 import asyncio
-from collections import deque
-from time import monotonic
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 from ..core.security import issue, passwords
@@ -12,32 +10,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 legacy_router = APIRouter(prefix="/auth", tags=["legacy room"])
 
 
-class AuthRateLimiter:
-    def __init__(self):
-        self.attempts = {}
-        self.next_cleanup = 0.0
-
-    def check(self, request, operation, limit):
-        now = monotonic()
-        window = 60
-        if now >= self.next_cleanup:
-            self.attempts = {key: hits for key, hits in self.attempts.items() if hits[-1] > now - window}
-            self.next_cleanup = now + window
-        host = request.client.host if request.client else "unknown"
-        key = (operation, host)
-        if key not in self.attempts and len(self.attempts) >= 10_000:
-            raise HTTPException(429, "Too many attempts. Try again shortly.", headers={"Retry-After": "60"})
-        hits = self.attempts.setdefault(key, deque())
-        while hits and hits[0] <= now - window:
-            hits.popleft()
-        if len(hits) >= limit:
-            raise HTTPException(429, "Too many attempts. Try again shortly.", headers={"Retry-After": "60"})
-        hits.append(now)
-
-
 @router.post("/login", response_model=Token)
 async def login(data: Login, request: Request):
-    request.app.state.auth_limiter.check(request, "login", 12)
     username = data.username if request.app.state.legacy_room else data.username.lower()
     async with request.app.state.resources.sql() as sql:
         user = await sql.scalar(select(User).where(User.username == username))

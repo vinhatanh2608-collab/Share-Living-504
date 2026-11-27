@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import SanitizedMessage from "../components/SanitizedMessage";
 import { api } from "../lib/api";
 import { type Advice, type Summary, useAction, useResource, vnd } from "../lib/living";
 
@@ -39,7 +40,7 @@ export default function AiAdvisorPage({ revision, reload }: { revision: number; 
       {history.data?.length === 0 && <p>Ask about spending, budgets, or overdue debts.</p>}
       {history.data?.map((item, i) => <article className="living-message" key={i}>
         <strong>{item.prompt}</strong><small>{item.source === "local" ? "Local analysis" : "External provider"}</small>
-        <p>{item.reply}</p><small>Personal {vnd(item.metrics.personal)} · Group {vnd(item.metrics.group)} · Overdue {vnd(item.metrics.overdue)}</small>
+        <SanitizedMessage text={item.reply} /><small>Personal {vnd(item.metrics.personal)} · Group {vnd(item.metrics.group)} · Overdue {vnd(item.metrics.overdue)}</small>
         {item.quick_actions.map(budget => <button key={budget.category} className="secondary" disabled={action.busy}
           onClick={() => void action.run(async () => {
             await api.put("/budgets", { category: budget.category, monthly_limit: budget.monthly_limit, month: budget.month });

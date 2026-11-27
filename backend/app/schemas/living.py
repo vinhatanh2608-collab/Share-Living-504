@@ -88,6 +88,7 @@ GROUP_PROOF_MAX_BYTES = 299_999
 
 
 class ReceiptUpload(ReceiptIn):
+    filename: str | None = None
     size: int = Field(strict=True, gt=0, le=GROUP_PROOF_MAX_BYTES)
     content_type: Literal["image/jpeg", "image/png", "image/webp"]
 

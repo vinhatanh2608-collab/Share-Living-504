@@ -36,6 +36,7 @@ LEGACY_PROOF_MAX_BYTES = 2_000_000
 
 
 class ProofUpload(BaseModel):
+    filename: str | None = None
     content_type: Literal["image/jpeg", "image/png", "image/webp"]
     size: int = Field(gt=0, le=LEGACY_PROOF_MAX_BYTES, strict=True)
 

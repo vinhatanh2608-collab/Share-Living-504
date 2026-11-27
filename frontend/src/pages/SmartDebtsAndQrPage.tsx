@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import Modal from "../components/Modal";
 import { api, explain, getObject, upload } from "../lib/api";
-import { compressReceipt } from "../lib/imageCompress";
+import { compressReceipt, receiptMime } from "../lib/imageCompress";
+import { vietQrUrl } from "../lib/safeUrl";
 import { type Debt, type Group, type Member, useAction, useResource, vnd } from "../lib/living";
 import type { Ticket } from "../types/api";
 
@@ -11,7 +12,7 @@ function Directory({ members }: { members: Member[] }) {
     const url = `https://img.vietqr.io/image/${qr.bank_bin}-${qr.bank_account_no}-compact2.png?` +
       new URLSearchParams({ accountName: qr.bank_account_name });
     return <div className="living-card living-qr" key={member.id}><strong>{member.name}</strong>
-      <img src={url} alt={`VietQR for ${member.name}`} loading="lazy" /><span>{qr.bank_account_no}</span></div>;
+      <img src={vietQrUrl(url)} alt={`VietQR for ${member.name}`} loading="lazy" referrerPolicy="no-referrer" /><span>{qr.bank_account_no}</span></div>;
   })}</div>;
 }
 
@@ -31,10 +32,10 @@ export function ProofReview({ groupId, proofId, creditor, close, reload }: {
     let active = true;
     void getObject(url).then(async blob => {
       if (blob.size >= 300_000) throw new Error("Receipt exceeds the size limit.");
-      const header = new Uint8Array(await blob.slice(0, 3).arrayBuffer());
-      if (header[0] !== 255 || header[1] !== 216 || header[2] !== 255) throw new Error("Receipt is not a JPEG image.");
+      const mime = await receiptMime(blob);
+      if (!mime) throw new Error("Receipt is not a supported image.");
       if (active) {
-        objectUrl = URL.createObjectURL(new Blob([blob], { type: "image/jpeg" }));
+        objectUrl = URL.createObjectURL(new Blob([blob], { type: mime }));
         setImage(objectUrl);
       }
     }).catch(error => { if (active) setError(explain(error)); });
@@ -70,7 +71,11 @@ function Payment({ groupId, ids, members, close, reload }: {
   useEffect(() => {
     const controller = new AbortController();
     void api.post<{ amount: number; qr_url: string }>(`${path}/debts/qr`, { debt_ids: ids }, { signal: controller.signal })
-      .then(response => { if (!controller.signal.aborted) setQuote(response.data); })
+      .then(response => {
+        const qr = vietQrUrl(response.data.qr_url);
+        if (!qr) throw new Error("Invalid VietQR URL.");
+        if (!controller.signal.aborted) setQuote({ ...response.data, qr_url: qr });
+      })
       .catch(error => { if (!controller.signal.aborted) setQuoteError(explain(error)); });
     return () => controller.abort();
   }, [path, ids]);
@@ -94,7 +99,7 @@ function Payment({ groupId, ids, members, close, reload }: {
     <div className="living-buttons"><button className="secondary" aria-pressed={tab === "pay"} onClick={() => setTab("pay")}>Creditor VietQR</button>
       <button className="secondary" aria-pressed={tab === "directory"} onClick={() => setTab("directory")}>Group QR directory</button></div>
     {tab === "directory" ? <Directory members={members} /> : <div className="form">
-      {quote ? <div className="living-qr"><strong>{vnd(quote.amount)}</strong><img src={quote.qr_url} alt="Exact payment VietQR" /></div>
+      {quote ? <div className="living-qr"><strong>{vnd(quote.amount)}</strong><img src={quote.qr_url} alt="Exact payment VietQR" referrerPolicy="no-referrer" /></div>
         : <p role={quoteError ? "alert" : "status"}>{quoteError || "Loading payment details…"}</p>}
       <form className="form" onSubmit={submit}>
         <label>Receipt image<input name="receipt" type="file" accept="image/jpeg,image/png,image/webp"

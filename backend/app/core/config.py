@@ -9,6 +9,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True, populate_by_name=True)
     environment: Literal["development", "production"] = "development"
+    trust_proxy: bool | None = None
+    trusted_proxy_ips: list[str] = ["127.0.0.1", "::1"]
+    rate_limit_max_keys: int = Field(default=50000, ge=1, le=50000)
+    force_https: bool = False
+    max_inflight_requests: int = Field(default=100, ge=1, le=200)
+    max_header_bytes: int = Field(default=16384, ge=1024, le=65536)
+    api_requests_per_minute: int = Field(default=120, ge=1, le=10000)
+    auth_requests_per_minute: int = Field(default=5, ge=1, le=10000)
+    ai_requests_per_minute: int = Field(default=10, ge=1, le=10000)
+    ai_requests_per_hour: int = Field(default=60, ge=1, le=10000)
+    receipt_requests_per_minute: int = Field(default=10, ge=1, le=10000)
     mysql_url: str
     mongo_url: str
     mongo_database: str = "dorm"
@@ -55,16 +66,20 @@ class Settings(BaseSettings):
             return None
         url = urlsplit(value)
         if (url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password
-                or url.query or url.fragment or url.path not in {"", "/"}):
-            raise ValueError("Use an HTTP(S) storage endpoint without credentials or a path")
+                or url.query or url.fragment or url.path.rstrip("/") not in {"", "/storage/v1/s3"}):
+            raise ValueError("Use an HTTP(S) storage endpoint or the Supabase S3 path")
         return value.rstrip("/")
 
     @model_validator(mode="after")
     def production_guard(self):
+        if self.trust_proxy is None:
+            self.trust_proxy = self.environment == "production"
         if self.environment == "development":
             self.cors_origins = list(dict.fromkeys([*self.cors_origins,
                 "http://127.0.0.1:1420", "http://localhost:1420"]))
         public_endpoint = self.s3_public_endpoint or self.s3_endpoint
+        if self.environment == "production" and any(origin.startswith("http:") for origin in self.cors_origins):
+            raise ValueError("Production CORS origins must use HTTPS or the native Tauri scheme")
         if self.environment == "production" and (
             not (self.s3_endpoint.startswith("https://") or self.s3_endpoint == "http://minio:9000")
             or not public_endpoint.startswith("https://")

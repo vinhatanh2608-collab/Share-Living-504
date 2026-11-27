@@ -2,6 +2,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Query, Request
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
+from ..core.mongo_filters import lookup_id, sanitize_filter_values
 from ..models.mysql_models import now
 from ..schemas.study import MaterialCreate, MaterialData, MaterialUpload, Note
 from ..services.storage_service import upload_ticket, finalize, download
@@ -42,9 +43,9 @@ async def create(data: MaterialCreate, request: Request, actor: Actor):
 @router.get("/materials")
 async def search(request: Request, actor: Actor, q: str = Query("", max_length=200),
                  after: str = Query("", max_length=64), limit: int = Query(50, ge=1, le=100)):
-    query = {"_id": {"$gt": after}}
+    query = {"_id": {"$gt": lookup_id(after)}}
     if q.strip():
-        query["$text"] = {"$search": q}
+        query["$text"] = {"$search": sanitize_filter_values(q)}
     docs = await request.app.state.resources.mongo.materials.find(query).sort("_id", 1).limit(limit + 1).to_list(limit + 1)
     return {"items": [view(doc) for doc in docs[:limit]],
             "next_cursor": docs[limit - 1]["_id"] if len(docs) > limit else None}
@@ -52,14 +53,14 @@ async def search(request: Request, actor: Actor, q: str = Query("", max_length=2
 
 @router.get("/materials/{ident}")
 async def get_material(ident: str, request: Request, actor: Actor):
-    doc = await request.app.state.resources.mongo.materials.find_one({"_id": ident})
+    doc = await request.app.state.resources.mongo.materials.find_one({"_id": lookup_id(ident)})
     if not doc:
         raise HTTPException(404, "Material not found")
     return {**view(doc), "url": await download(doc["key"], namespace="study", user_id=doc["owner_id"])}
 
 
 def editable(ident, actor):
-    return {"_id": ident, **({} if is_owner(actor) else {"owner_id": actor.id})}
+    return {"_id": lookup_id(ident), **({} if is_owner(actor) else {"owner_id": actor.id})}
 
 
 @router.put("/materials/{ident}")
@@ -83,7 +84,7 @@ async def delete(ident: str, request: Request, actor: Actor):
 async def get_note(name: str, request: Request, actor: Actor):
     if not 1 <= len(name) <= 100:
         raise HTTPException(422, "Invalid note name")
-    doc = await request.app.state.resources.mongo.notes.find_one({"_id": name})
+    doc = await request.app.state.resources.mongo.notes.find_one({"_id": lookup_id(name)})
     return view(doc) if doc else {"id": name, "text": "", "version": 0}
 
 
@@ -93,7 +94,7 @@ async def put_note(name: str, data: Note, request: Request, actor: Actor):
         raise HTTPException(422, "Invalid note name")
     try:
         doc = await request.app.state.resources.mongo.notes.find_one_and_update(
-            {"_id": name, "version": data.expected_version},
+            {"_id": lookup_id(name), "version": data.expected_version},
             {"$set": {"text": data.text, "editor_id": actor.id, "updated_at": now()},
              "$inc": {"version": 1}}, upsert=data.expected_version == 0,
             return_document=ReturnDocument.AFTER)

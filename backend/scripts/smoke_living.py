@@ -2,6 +2,9 @@
 import asyncio
 from base64 import b64decode
 import json
+import os
+from io import BytesIO
+from PIL import Image
 from secrets import token_hex, token_urlsafe
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -11,7 +14,7 @@ from websockets.asyncio.client import connect
 
 from app.api.routes_advisor import today_local
 
-API = "http://127.0.0.1:8000"
+API = os.getenv("SMOKE_API_URL", "http://127.0.0.1:8000").rstrip("/")
 ORIGIN = "http://127.0.0.1:1420"
 JPEG = b64decode(
     "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/"
@@ -79,7 +82,7 @@ async def main():
     root = "/groups"
     group = request("POST", root, owner, {"name": f"Smoke test {run_id}"})
     path = f"{root}/{group['id']}"
-    ws = "ws://127.0.0.1:8000/ws"
+    ws = API.replace("http", "ws", 1) + "/ws"
     async with (
         connect(ws, origin=ORIGIN, additional_headers={"Authorization": f"Bearer {owner}"}) as owner_ws,
         connect(ws, origin=ORIGIN, additional_headers={"Authorization": f"Bearer {member}"}) as member_ws,
@@ -109,7 +112,9 @@ async def main():
         receipt = f"{path}/proofs/{proof['id']}"
         url = request("GET", receipt, owner)["url"]
         with urlopen(Request(url, headers={"Origin": ORIGIN}), timeout=10) as response:
-            assert response.read() == JPEG
+            with Image.open(BytesIO(response.read())) as receipt_image:
+                assert receipt_image.format == "JPEG" and receipt_image.size == (1, 1)
+                receipt_image.load()
             assert response.headers.get("Access-Control-Allow-Origin") in {ORIGIN, "*"}
         request("PATCH", f"{receipt}/verify", owner, {"decision": "APPROVE"})
         assert (await wait_event(member_ws, "PROOF_VERIFIED"))["status"] == "PAID"

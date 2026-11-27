@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query, Request
 from bson import ObjectId
+from ..core.mongo_filters import lookup_id
 from ..models.mysql_models import now
 from ..schemas.chat import ChatMessage
 from .deps import Actor
@@ -17,6 +18,7 @@ async def history(request: Request, actor: Actor, before: str | None = Query(Non
     messages = request.app.state.resources.mongo.messages
     query = {"$or": [{"kind": "text"}, {"audience": actor.id}]}
     if before:
+        before = lookup_id(before)
         key = ObjectId(before) if ObjectId.is_valid(before) else before
         cursor = await messages.find_one({"_id": key, **query}, {"_id": 0, "sort_key": 1})
         if not cursor:

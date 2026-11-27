@@ -16,6 +16,7 @@ from app.core.security import passwords
 from app.main import create_app
 from app.models.mysql_models import Base
 from app.services.advisor import provider_reply
+from app.core.circuit_breaker import CircuitBreaker
 from app.services.ws_manager import Manager
 
 
@@ -78,6 +79,8 @@ def client():
     async def lifespan(_app):
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+        app.state.http = Mock()
+        app.state.advisor_breaker = CircuitBreaker()
         app.state.resources = SimpleNamespace(sql=async_sessionmaker(engine, expire_on_commit=False),
             mongo=SimpleNamespace(group_messages=Collection(), ai_chat_history=Collection()))
         app.state.ws = Manager()
@@ -219,10 +222,11 @@ def test_analytics_budget_and_advisor_are_private_and_fall_back_locally(client):
 
 def test_gemini_provider_uses_configured_model_and_returns_response():
     config = SimpleNamespace(gemini_api_key=SecretStr("synthetic-key"), gemini_model="test-flash")
-    transport = Mock(return_value="Provider reply")
+    http = Mock()
+    transport = AsyncMock(return_value="Provider reply")
     with patch("app.services.advisor.settings", return_value=config), patch("app.services.advisor.request_advice", transport):
-        assert asyncio.run(provider_reply("Summarize", {"personal": 500})) == "Provider reply"
-    transport.assert_called_once_with("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        assert asyncio.run(provider_reply("Summarize", {"personal": 500}, http, CircuitBreaker())) == "Provider reply"
+    transport.assert_awaited_once_with(http, "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
                                       "synthetic-key", "test-flash", "Summarize", {"personal": 500})
 
 
@@ -267,16 +271,16 @@ def test_registration_validation_does_not_echo_password(client):
 def test_auth_throttles_login_and_registration(client):
     login = "/api/v1/auth/login"
     credentials = {"username": "missing-user", "password": "wrong-password"}
-    for _ in range(12):
+    for _ in range(5):
         assert client.post(login, json=credentials).status_code == 401
     blocked = client.post(login, json=credentials)
     assert blocked.status_code == 429
-    assert blocked.headers["retry-after"] == "60"
+    assert 1 <= int(blocked.headers["retry-after"]) <= 60
 
     register = "/api/v1/auth/register"
     credentials["full_name"] = "Test User"
     assert client.post(register, json=credentials).status_code == 201
-    for _ in range(5):
+    for _ in range(4):
         duplicate = client.post(register, json=credentials)
         assert duplicate.status_code == 409
         assert duplicate.json() == {"detail": "Registration could not be completed"}
@@ -294,13 +298,13 @@ def test_storage_rejects_invalid_images_before_permanent_write(data, limit):
     s3.get_object.return_value = {"Body": BytesIO(data)}
     with patch("app.services.storage_service.client", return_value=s3), pytest.raises(HTTPException) as error:
         asyncio.run(finalize(1, "group-receipts/2", uuid4(), {"image/jpeg"}, limit))
-    assert error.value.status_code == 422
+    assert error.value.status_code == 400
     s3.put_object.assert_not_called()
     s3.copy_object.assert_not_called()
 
 
 @pytest.mark.parametrize("format_name", ["JPEG", "PNG", "WEBP"])
-def test_storage_keeps_exact_validated_image_bytes(format_name):
+def test_storage_reencodes_valid_images(format_name):
     from io import BytesIO
     from PIL import Image
     from app.services.storage_service import download, finalize
@@ -316,7 +320,11 @@ def test_storage_keeps_exact_validated_image_bytes(format_name):
     with patch("app.services.storage_service.client", return_value=s3):
         key = asyncio.run(finalize(1, "group-receipts/2", upload_id, {mime}, 299_999))
     assert s3.get_object.call_args.kwargs["IfMatch"] == "test"
-    assert s3.put_object.call_args.kwargs["Body"] == data
+    assert key.startswith("receipts/2/")
+    with Image.open(BytesIO(s3.put_object.call_args.kwargs["Body"])) as clean:
+        assert clean.format == format_name and clean.size == (2, 2)
+    assert s3.put_object.call_args.kwargs["ContentType"] == mime
+    assert s3.put_object.call_args.kwargs["ContentDisposition"] == "attachment"
     with patch("app.services.storage_service.presign", AsyncMock(return_value="signed")) as sign:
         assert asyncio.run(download(key, namespace="group-receipts/2", user_id=1)) == "signed"
         sign.assert_awaited_once_with("get_object", {"Key": key})

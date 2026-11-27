@@ -10,6 +10,7 @@ import logging
 
 from .deps import Actor
 from .routes_living import approved_member
+from ..core.mongo_filters import lookup_id
 from ..models.living import GroupEvent, GroupMember, GroupProof
 from ..models.mysql_models import now
 from ..schemas.living import ChatIn
@@ -37,6 +38,7 @@ async def chat(group_id: int, request: Request, actor: Actor, before: str | None
     async with resources.sql() as sql:
         await approved_member(sql, group_id, actor.id)
     if before:
+        before = lookup_id(before)
         anchor = await resources.mongo.group_messages.find_one({"group_id": group_id, "_id": before},
                                                                {"_id": 0, "created_at": 1})
         if not anchor:

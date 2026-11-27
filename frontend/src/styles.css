@@ -172,6 +172,7 @@
 .living-chat { max-height: 55vh; overflow-y: auto; }
 .living-message { display: grid; gap: .4rem; padding: .8rem; background: #eef4ee; border-radius: .65rem; }
 .living-message p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sanitized-message { white-space: pre-wrap; overflow-wrap: anywhere; }
 .living-message small { color: #455d52; }
 .living-message button { justify-self: start; }
 @media (max-width: 840px) {

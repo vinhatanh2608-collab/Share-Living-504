@@ -24,3 +24,11 @@ export async function compressReceipt(file: File): Promise<Blob> {
     canvas.width = canvas.height = 1;
   }
 }
+export async function receiptMime(blob: Blob) {
+  const bytes = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+  if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return "image/jpeg";
+  if ([137, 80, 78, 71, 13, 10, 26, 10].every((value, index) => value === bytes[index])) return "image/png";
+  const signature = String.fromCharCode(...bytes);
+  if (signature.startsWith("RIFF") && signature.slice(8, 12) === "WEBP") return "image/webp";
+}
+
