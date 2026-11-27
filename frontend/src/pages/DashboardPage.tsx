@@ -25,7 +25,7 @@ export default function DashboardPage({ user }: { user: User }) {
   const chosen = my.filter(d => d.status === "open" && selected.includes(d.id));
   const name = (id: number) => roommates.find(r => r.id === id)?.name ?? `Roommate #${id}`;
   const total = (rows: Debt[]) => money(rows.reduce((sum, d) => sum + d.amount, 0));
-  function reload() { void refresh(user.is_owner); }
+  function reload() { void refresh(); }
   async function remind(id: number) {
     setReminding(id);
     try { await api.post(`/finance/debts/${id}/reminder`); setFeedback(`Reminder sent for debt #${id}.`); }
@@ -57,8 +57,7 @@ export default function DashboardPage({ user }: { user: User }) {
           <strong>{money(d.amount)}</strong>
         </div>)}</div>)}
     </section>
-    {user.is_owner && <section className="panel section"><div className="section-head"><div><h2><ClipboardCheck size={20}/> Payment approvals</h2><p>Only you can make a decision.</p></div><span className="pill">{proofs.length} pending</span></div>
-      {!proofs.length && <p className="empty">No proofs waiting for review.</p>}
+    {proofs.length > 0 && <section className="panel section"><div className="section-head"><div><h2><ClipboardCheck size={20}/> Payment approvals</h2><p>Only you can make a decision.</p></div><span className="pill">{proofs.length} pending</span></div>
       {proofs.map(p => <div className="review-row" key={p.id}><div><strong>Proof #{p.id}</strong><small>Debt #{p.debt_id} · {date(p.submitted_at)}</small></div>
         <button className="secondary" onClick={() => setReceipt(p.id)}>View receipt</button><ProofActions id={p.id} done={approved => { setFeedback(approved ? "Debt marked paid." : "Proof rejected."); reload(); }}/></div>)}
     </section>}

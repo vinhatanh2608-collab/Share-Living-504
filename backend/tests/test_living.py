@@ -107,15 +107,17 @@ def account(client, username):
 def test_group_workflow_scopes_qr_chat_and_receipts_to_members(client):
     member_id, member = account(client, "debtor")
     owner_id, owner = account(client, "creditor")
-    _, outsider = account(client, "outsider")
+    outsider_id, outsider = account(client, "outsider")
     root = "/api/v1/groups"
     group = client.post(root, headers=owner, json={"name": "Test household"}).json()
     assert group["role"] == "OWNER"
     path = f"{root}/{group['id']}"
     assert client.get(f"{path}/members", headers=outsider).status_code == 404
+    other_group = client.post(root, headers=outsider, json={"name": "Other household"}).json()
     origin = {"Origin": "http://127.0.0.1:1420"}
     owner_token = owner["Authorization"].split()[1]
-    with client.websocket_connect(f"/ws?token={owner_token}", headers=origin) as socket:
+    with client.websocket_connect("/ws", headers=origin, subprotocols=["bearer", owner_token]) as socket:
+        assert socket.accepted_subprotocol == "bearer"
         assert socket.receive_json()["type"] == "connected"
         joined = client.post(f"{root}/join", headers=member, json={"group_code": group["code"].lower()})
         assert joined.json()["status"] == "PENDING", joined.text
@@ -134,6 +136,7 @@ def test_group_workflow_scopes_qr_chat_and_receipts_to_members(client):
         expense = client.post(f"{path}/expenses", headers=owner, json=body)
         assert expense.status_code == 201, expense.text
         assert client.post(f"{path}/expenses", headers=owner, json=body).json() == expense.json()
+        assert client.get(f"{path}/debts", headers=outsider).status_code == 404
         debts = client.get(f"{path}/debts", headers=member).json()
         assert len(debts) == 1 and debts[0]["amount"] == 60 and debts[0]["creditor_id"] == owner_id
         ids = {"debt_ids": [debts[0]["id"]]}
@@ -159,6 +162,8 @@ def test_group_workflow_scopes_qr_chat_and_receipts_to_members(client):
         assert socket.receive_json()["type"] == "group_proof_submitted"
         receipt = f"{path}/proofs/{proof_id}"
         assert client.get(receipt, headers=outsider).status_code == 404
+        wrong_group_receipt = f"{root}/{other_group['id']}/proofs/{proof_id}"
+        assert client.get(wrong_group_receipt, headers=outsider).status_code == 404
         with patch("app.api.routes_group_finance.download", AsyncMock(return_value=ticket["url"])):
             assert client.get(receipt, headers=owner).json()["url"] == ticket["url"]
         assert client.patch(f"{receipt}/verify", headers=member, json={"decision": "APPROVE"}).status_code == 403
@@ -181,6 +186,9 @@ def test_group_workflow_scopes_qr_chat_and_receipts_to_members(client):
                             "reject_reason": "Unreadable receipt"}).json()["status"] == "REJECTED"
         assert client.post(f"{path}/proofs", headers=member, json=submit).json()["status"] == "REJECTED"
         assert finalize.await_count == 1
+    assert client.post(f"{root}/join", headers=outsider, json={"group_code": group["code"]}).status_code == 200
+    assert client.patch(f"{path}/members/{outsider_id}", headers=owner, json={"status": "APPROVED"}).status_code == 200
+    assert client.patch(verify, headers=outsider, json={"decision": "APPROVE"}).status_code == 403
     reopened = client.get(f"{path}/debts", headers=member).json()[0]
     assert reopened["status"] == "UNPAID" and reopened["proof_id"] is None
     for headers, incoming, outgoing in [(member, 60, 0), (owner, 0, 60), (outsider, 0, 0)]:
@@ -253,8 +261,8 @@ def test_websocket_requires_authentication(client):
     from starlette.websockets import WebSocketDisconnect
 
     with pytest.raises(WebSocketDisconnect) as error:
-        with client.websocket_connect("/ws"):
-            pytest.fail("Unauthenticated websocket connected")
+        with client.websocket_connect("/ws") as socket:
+            socket.receive_json()
     assert error.value.code == 1008
 
 
@@ -423,3 +431,37 @@ def test_group_chat_cursor_keeps_tie_order_and_group_scope(client):
     assert result.status_code == 200
     assert [row["id"] for row in result.json()] == ["message:a", "message:b"]
     assert client.get(path, headers=actor, params={"before": "message:z"}).status_code == 404
+
+
+def test_group_scoped_websocket_requires_approved_membership(client):
+    from starlette.websockets import WebSocketDisconnect
+
+    _, owner = account(client, "socket-owner")
+    _, outsider = account(client, "socket-outsider")
+    group = client.post("/api/v1/groups", headers=owner, json={"name": "Socket group"}).json()
+    path = f"/ws?group_id={group['id']}"
+    with client.websocket_connect(path, subprotocols=["bearer", owner["Authorization"].split()[1]]) as socket:
+        assert socket.accepted_subprotocol == "bearer"
+        assert socket.receive_json()["type"] == "connected"
+    with pytest.raises(WebSocketDisconnect) as closed:
+        with client.websocket_connect(path, subprotocols=["bearer", outsider["Authorization"].split()[1]]) as socket:
+            socket.receive_json()
+    assert closed.value.code == 1008
+
+
+@pytest.mark.parametrize("format_name", ["JPEG", "PNG", "WEBP"])
+def test_receipt_sanitizer_preserves_portrait_orientation(format_name):
+    from io import BytesIO
+
+    from PIL import Image
+    from app.services.storage_service import sanitize_image
+
+    source = BytesIO()
+    with Image.new("RGB", (60, 40), "white") as image:
+        exif = image.getexif()
+        exif[274] = 6
+        image.save(source, format=format_name, exif=exif)
+    _, _, cleaned = sanitize_image(source.getvalue())
+    with Image.open(BytesIO(cleaned)) as receipt:
+        assert receipt.size == (40, 60)
+        assert not receipt.getexif()

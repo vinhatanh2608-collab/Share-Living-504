@@ -5,29 +5,30 @@ import type { Event, User } from "../types/api";
 import { useRoomStore } from "./useRoomStore";
 
 type Connection = "offline" | "connecting" | "online";
-export const useRealtimeStore = create<{ status: Connection; notes: number }>(() => ({ status: "offline", notes: 0 }));
+export const useRealtimeStore = create<{ status: Connection; notes: number; error: string }>(() => ({ status: "offline", notes: 0, error: "" }));
 export function connectRealtime(token: string, user: User, receive?: (event: unknown) => void) {
   let socket: WebSocket | undefined;
   let retry: ReturnType<typeof setTimeout>;
   let watchdog: ReturnType<typeof setTimeout>;
   let stopped = false;
   let attempts = 0;
+  let policyClosed = false;
   const seen = new Set<number>();
   const refresh = () => {
     const room = useRoomStore.getState();
-    void room.refresh(user.is_owner);
+    void room.refresh();
     void room.history().catch(() => {});
   };
   function connect() {
-    if (stopped || !navigator.onLine) return;
+    if (stopped || policyClosed || !navigator.onLine) return;
     let connection: WebSocket;
     try {
       const url = new URL(realtimeUrl());
       if (url.username || url.password || !(url.protocol === "wss:" ||
         (url.protocol === "ws:" && ["localhost", "127.0.0.1"].includes(url.hostname)))) throw new Error("Unsafe WS URL");
-      url.searchParams.set("token", token);
-      useRealtimeStore.setState({ status: "connecting" });
-      socket = connection = new WebSocket(url);
+      url.searchParams.delete("token");
+      useRealtimeStore.setState({ status: "connecting", error: "" });
+      socket = connection = new WebSocket(url, ["bearer", token]);
     } catch { useRealtimeStore.setState({ status: "offline" }); return; }
     const watch = (timeout: number) => {
       clearTimeout(watchdog);
@@ -64,13 +65,13 @@ export function connectRealtime(token: string, user: User, receive?: (event: unk
             if (seen.size > 500) seen.delete(seen.values().next().value!);
             room.ingest({ kind: "payment_card", id: `proof-event:${event.event_id}`, event_id: event.event_id,
               card: event.card, created_at: new Date().toISOString() });
-            void room.refresh(user.is_owner);
+            void room.refresh();
             if (event.card.status !== "pending" && event.card.debtor_id === user.id)
               void notify("Payment proof reviewed", `Debt #${event.card.debt_id}: ${event.card.status === "paid" ? "approved" : "rejected"}.`);
             break;
           case "overdue_reminder":
             void notify("Overdue debt reminder", `Open Dormitory Desk to review debt #${event.debt_id}.`);
-            void room.refresh(user.is_owner);
+            void room.refresh();
             break;
           case "note_updated": useRealtimeStore.setState(s => ({ notes: s.notes + 1 })); break;
         }
@@ -82,7 +83,12 @@ export function connectRealtime(token: string, user: User, receive?: (event: unk
       socket = undefined;
       if (stopped) return;
       useRealtimeStore.setState({ status: "offline" });
-      if (event.code === 1008 || !navigator.onLine) return;
+      if (event.code === 1008) {
+        policyClosed = true;
+        useRealtimeStore.setState({ error: "Kết nối cập nhật trực tiếp đã bị ngắt. Phiên có thể đã hết hạn, bạn không có quyền truy cập hoặc đã kết nối quá nhiều lần. Hãy đợi một lúc rồi đăng nhập lại." });
+        return;
+      }
+      if (!navigator.onLine) return;
       retry = setTimeout(connect, Math.min(30000, 1000 * 2 ** Math.min(attempts++, 5)) + Math.random() * 400);
     };
   }
@@ -105,6 +111,6 @@ export function connectRealtime(token: string, user: User, receive?: (event: unk
     clearTimeout(retry);
     clearTimeout(watchdog);
     if (socket) { socket.onclose = null; socket.onerror = null; socket.close(); }
-    useRealtimeStore.setState({ status: "offline", notes: 0 });
+    useRealtimeStore.setState({ status: "offline", notes: 0, error: "" });
   };
 }

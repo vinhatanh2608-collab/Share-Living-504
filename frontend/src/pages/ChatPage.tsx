@@ -51,10 +51,11 @@ export default function ChatPage({ user }: { user: User }) {
       {messages.map(m => {
         if (m.kind === "payment_card") {
           const state = m.card.status === "pending" ? decisions[m.card.proof_id] ?? "pending" : m.card.status;
-          const canView = user.is_owner || m.card.debtor_id === user.id;
+          const canReview = m.card.creditor_id === user.id;
+          const canView = canReview || m.card.debtor_id === user.id;
           return <article key={m.id} className="payment-card"><div className="section-head"><div><h2><ShieldCheck size={18}/> Payment proof</h2><p>Debt #{m.card.debt_id} · Proof #{m.card.proof_id}</p></div><span className={`pill ${state === "pending" ? "wait" : state === "rejected" ? "late" : ""}`}>{state}</span></div>
             <div className="actions">{canView && <button className="secondary" onClick={() => setReceipt(m.card.proof_id)}>View receipt</button>}
-              {user.is_owner && state === "pending" && <ProofActions id={m.card.proof_id} done={ok => { setDecisions(s => ({ ...s, [m.card.proof_id]: ok ? "paid" : "rejected" })); void refresh(true); }}/>}</div></article>;
+              {canReview && state === "pending" && <ProofActions id={m.card.proof_id} done={ok => { setDecisions(s => ({ ...s, [m.card.proof_id]: ok ? "paid" : "rejected" })); void refresh(); }}/>}</div></article>;
         }
         const name = roommates.find(r => r.id === m.sender_id)?.name ?? `Roommate #${m.sender_id}`;
         return <article key={m.id} className={`message ${m.sender_id === user.id ? "mine" : ""}`}><span className="avatar">{initials(name)}</span><div><small>{m.sender_id === user.id ? "You" : name} · {new Date(m.created_at.endsWith("Z") || /[+-]\d\d:\d\d$/.test(m.created_at) ? m.created_at : m.created_at + "Z").toLocaleString()}</small><p>{m.text}</p></div></article>;

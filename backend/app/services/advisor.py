@@ -48,5 +48,5 @@ async def provider_reply(message, context, client, breaker):
             return None
         return reply[:2000] if reply else None
     except (httpx.HTTPError, TimeoutError, ValueError, KeyError, IndexError, TypeError):
-        logger.warning("Financial advisor provider unavailable")
+        logger.warning("Financial advisor provider unavailable (breaker=%s)", breaker.state, exc_info=True)
         return None

@@ -84,9 +84,10 @@ async def main():
     path = f"{root}/{group['id']}"
     ws = API.replace("http", "ws", 1) + "/ws"
     async with (
-        connect(ws, origin=ORIGIN, additional_headers={"Authorization": f"Bearer {owner}"}) as owner_ws,
-        connect(ws, origin=ORIGIN, additional_headers={"Authorization": f"Bearer {member}"}) as member_ws,
+        connect(f"{ws}?group_id={group['id']}", origin=ORIGIN, subprotocols=["bearer", owner]) as owner_ws,
+        connect(ws, origin=ORIGIN, subprotocols=["bearer", member]) as member_ws,
     ):
+        assert owner_ws.subprotocol == member_ws.subprotocol == "bearer"
         await wait_event(owner_ws, "connected")
         await wait_event(member_ws, "connected")
         assert request("POST", f"{root}/join", member, {"group_code": group["code"]})["status"] == "PENDING"

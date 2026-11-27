@@ -57,17 +57,18 @@ def proof_event(sql, proof, debt, creditor_id):
                             "debtor_id": debt.debtor_id, "creditor_id": creditor_id}))
 
 
-async def review(resources, actor, owner, proof_id, approve):
-    if not owner:
-        raise HTTPException(403, "Owner approval required")
+async def review(resources, actor, proof_id, approve):
     async with resources.sql.begin() as sql:
         debt_id = await sql.scalar(select(Proof.debt_id).where(Proof.id == proof_id))
         if debt_id is None:
             raise HTTPException(404, "Proof not found")
         debt = await sql.scalar(select(Debt).where(Debt.id == debt_id).with_for_update())
         proof = await sql.scalar(select(Proof).where(Proof.id == proof_id).with_for_update())
+        expense = await sql.get(Expense, debt.expense_id)
+        if expense.creditor_id != actor:
+            raise HTTPException(403, "Only the creditor can verify this receipt")
         try:
-            target = decision(owner, proof.status, approve)
+            target = decision(True, proof.status, approve)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         if target != proof.status:
@@ -77,7 +78,6 @@ async def review(resources, actor, owner, proof_id, approve):
             proof.decided_at = now()
             proof.decided_by = actor
             debt.status = "paid" if approve else "open"
-            expense = await sql.get(Expense, debt.expense_id)
             proof_event(sql, proof, debt, expense.creditor_id)
         return {"id": proof.id, "status": proof.status}
 

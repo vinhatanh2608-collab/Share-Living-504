@@ -118,7 +118,7 @@ async def submit(debt_id: int, data: PaymentProof, request: Request, actor: Acto
 
 @router.post("/proofs/{proof_id}/decision")
 async def decide(proof_id: int, data: ProofDecision, request: Request, actor: Actor):
-    return await review(request.app.state.resources, actor.id, is_owner(actor), proof_id, data.approve)
+    return await review(request.app.state.resources, actor.id, proof_id, data.approve)
 
 
 def batch_scope(ids):
@@ -187,10 +187,10 @@ async def submit_batch(data: BatchSubmit, request: Request, actor: Actor):
 
 @router.get("/proofs/pending")
 async def pending(request: Request, actor: Actor, after: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)):
-    if not is_owner(actor):
-        raise HTTPException(403, "Owner approval required")
     async with request.app.state.resources.sql() as sql:
-        proofs = await sql.scalars(select(Proof).where(Proof.id > after, Proof.status == "pending")
+        proofs = await sql.scalars(select(Proof).join(Debt, Debt.id == Proof.debt_id)
+                                   .join(Expense, Expense.id == Debt.expense_id)
+                                   .where(Proof.id > after, Proof.status == "pending", Expense.creditor_id == actor.id)
                                    .order_by(Proof.id).limit(limit))
         return [{"id": p.id, "debt_id": p.debt_id,
                  "submitted_at": p.submitted_at.replace(tzinfo=timezone.utc)} for p in proofs]
@@ -203,7 +203,8 @@ async def proof_download(proof_id: int, request: Request, actor: Actor):
         if not proof:
             raise HTTPException(404, "Proof not found")
         debt = await sql.get(Debt, proof.debt_id)
-        if actor.id != debt.debtor_id and not is_owner(actor):
+        expense = await sql.get(Expense, debt.expense_id)
+        if actor.id not in (debt.debtor_id, expense.creditor_id):
             raise HTTPException(404, "Proof not found")
         key = proof.object_key
     return {"id": proof.id, "status": proof.status, "url": await download(key)}

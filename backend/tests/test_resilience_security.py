@@ -84,8 +84,9 @@ def test_admission_before_session_checkout_and_release():
                     saturated.set()
                 await release.wait()
 
-        guard = FloodGuard(endpoint, 2, 1024)
-        scope = {"type": "http", "headers": []}
+        origin = b"http://127.0.0.1:1420"
+        guard = FloodGuard(endpoint, 2, 1024, cors_origins=[origin.decode()])
+        scope = {"type": "http", "headers": [(b"origin", origin)]}
         send = AsyncMock()
         try:
             await guard(dict(scope, headers=[(b"test", b"a" * 1024)]), AsyncMock(), send)
@@ -97,6 +98,7 @@ def test_admission_before_session_checkout_and_release():
             starts = [call.args[0] for call in send.await_args_list if "status" in call.args[0]]
             assert len(starts) == 8 and all(m["status"] == 503 for m in starts)
             assert all(dict(m["headers"])[b"retry-after"] == b"1" for m in starts)
+            assert all(dict(m["headers"])[b"access-control-allow-origin"] == origin for m in starts)
             release.set()
             await asyncio.gather(*tasks)
             assert engine.pool.checkedout() == 0

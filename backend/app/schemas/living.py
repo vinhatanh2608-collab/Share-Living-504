@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, StringConstraints, field_validator
 
+from ..core.request_security import RECEIPT_LIMIT
 from .auth import Login
 
 Category = Literal["FOOD", "TRANSPORT", "HOUSING", "STUDY", "ENTERTAINMENT", "OTHER"]
@@ -84,7 +85,7 @@ class ReceiptIn(BaseModel):
     debt_ids: Ids
 
 
-GROUP_PROOF_MAX_BYTES = 299_999
+GROUP_PROOF_MAX_BYTES = RECEIPT_LIMIT
 
 
 class ReceiptUpload(ReceiptIn):

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from ipaddress import ip_network
 from .rate_limit import LoginCooldown, RateLimiter, identity, resolve_proxy
 from math import ceil
@@ -8,13 +9,24 @@ from time import monotonic, time
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse
 
+logger = logging.getLogger(__name__)
+
 JSON_LIMIT = 1_000_000
 RECEIPT_LIMIT = 5_000_000
+MULTIPART_OVERHEAD = 65_536
 RECEIPT_PATH = r"/(?:groups/[^/]+/proofs(?:/upload)?|finance/(?:debts/[^/]+/proof(?:-upload|s)|proof-batches(?:/upload)?))"
 
 
 def is_receipt_path(path):
     return bool(fullmatch(RECEIPT_PATH, path.removeprefix("/api/v1").rstrip("/")))
+
+
+def rejection_cors_headers(scope, origins):
+    origin = Headers(scope=scope).get("origin")
+    if origin in origins:
+        return {"Access-Control-Allow-Origin": origin, "Vary": "Origin",
+                "Access-Control-Expose-Headers": "Retry-After"}
+    return {}
 
 
 class RequestSecurity:
@@ -41,7 +53,7 @@ class RequestSecurity:
             elif receipt:
                 rules.append(("receipt", self.config.receipt_requests_per_minute, 60))
         for name, limit, window in rules:
-            subject = identity(scope) if name in {"advisor", "receipt"} else host
+            subject = identity(scope) if name in {"api", "advisor", "receipt"} else host
             wait, headers = self.limiter.check((name, window, subject), limit, window, now)
             if wait:
                 return wait, headers
@@ -57,9 +69,11 @@ class RequestSecurity:
         secure = scope.get("scheme") in {"https", "wss"}
         if kind == "websocket":
             if (production or self.config.force_https) and not secure:
+                logger.warning("WebSocket upgrade rejected: HTTPS required")
                 return await send({"type": "websocket.close", "code": 1008})
             ip = (scope.get("client") or ("unknown",))[0]
             if self.connections.get(ip, 0) >= 5:
+                logger.warning("WebSocket upgrade rejected: IP connection limit")
                 return await send({"type": "websocket.close", "code": 1008})
             self.connections[ip] = self.connections.get(ip, 0) + 1
             try:
@@ -86,11 +100,8 @@ class RequestSecurity:
             await send(message)
 
         async def reject(status, detail, headers=None):
-            response_headers = dict(headers or {})
-            origin = Headers(scope=scope).get("origin")
-            if origin in self.config.cors_origins:
-                response_headers.update({"Access-Control-Allow-Origin": origin, "Vary": "Origin",
-                                         "Access-Control-Expose-Headers": "Retry-After"})
+            logger.warning("Request rejected: %s %s status=%d reason=%s", scope["method"], scope["path"], status, detail)
+            response_headers = {**(headers or {}), **rejection_cors_headers(scope, self.config.cors_origins)}
             await JSONResponse({"detail": detail}, status_code=status, headers=response_headers)(scope, receive, secured_send)
 
         if (production or self.config.force_https) and not secure:
@@ -108,9 +119,11 @@ class RequestSecurity:
                 return await reject(429, "Too many requests. Try again shortly.", {"Retry-After": str(retry)})
         if scope["method"] in {"POST", "PUT", "PATCH", "DELETE"}:
             headers = Headers(scope=scope)
-            media = headers.get("content-type", "").split(";", 1)[0].lower()
+            media = headers.get("content-type", "").split(";", 1)[0].strip().lower()
             raw_receipt = receipt and (media.startswith("image/") or media == "multipart/form-data")
             limit = RECEIPT_LIMIT if raw_receipt else JSON_LIMIT
+            if receipt and media == "multipart/form-data":
+                limit += MULTIPART_OVERHEAD
             lengths = headers.getlist("content-length")
             if lengths:
                 if len(lengths) != 1 or not fullmatch(r"[0-9]{1,20}", lengths[0]):

@@ -18,13 +18,13 @@ function Workspace({ user, token }: { user: User; token: string }) {
   const [page, setPage] = useState<PageId>("dashboard");
   const [notice, setNotice] = useState("");
   const [notifications, setNotifications] = useState(false);
-  const connection = useRealtimeStore(s => s.status);
+  const { status: connection, error: realtimeError } = useRealtimeStore();
   const logout = useAuthStore(s => s.logout);
   useEffect(() => {
     const room = useRoomStore.getState();
-    void room.refresh(user.is_owner);
+    void room.refresh();
     const cleanup = connectRealtime(token, user);
-    const refresh = setInterval(() => void room.refresh(user.is_owner), 60000);
+    const refresh = setInterval(() => void room.refresh(), 60000);
     // Match lifetime of the in-memory access token and backend WebSocket session.
     const expire = setTimeout(logout, 30 * 60_000);
     return () => { clearInterval(refresh); clearTimeout(expire); cleanup(); room.reset(); };
@@ -42,7 +42,7 @@ function Workspace({ user, token }: { user: User; token: string }) {
     <main className="workspace" id="main-content"><div className="topbar"><span><i/> DORM ROOM / SHARED WORKSPACE</span>
       <button className="secondary" onClick={() => void enable()} disabled={notifications}><Bell size={16}/>{notifications ? "Alerts enabled" : "Enable desktop alerts"}</button></div>
       {connection !== "online" && <div className="app-notice" role="status">
-        Live updates are disconnected. Check your connection. Previously loaded data may be out of date.
+        {realtimeError || "Đã mất kết nối cập nhật trực tiếp. Hãy kiểm tra kết nối mạng."}
       </div>}
       {notice && <div className="app-notice" role="status">{notice}<button className="icon" onClick={() => setNotice("")} aria-label="Dismiss alert"><X size={16}/></button></div>}
       {page === "dashboard" && <DashboardPage user={user}/>}

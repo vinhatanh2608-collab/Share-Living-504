@@ -7,7 +7,6 @@ Shared Living tracks personal income and spending, splits group expenses, and le
 Install Docker Desktop with Docker Compose, Python 3.11+, and Node.js. Tauri also needs Rust, the Visual Studio C++ build tools, and WebView2. Run from the repository root in PowerShell.
 
 ```powershell
-Set-Location D:\qlct
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
@@ -25,7 +24,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 -BuildExe
 From the root, run the backend commands in one terminal. Run the final Uvicorn command after Docker reports the database and storage services healthy.
 
 ```powershell
-Set-Location D:\qlct\backend
+Set-Location backend
 if (!(Test-Path .env)) { Copy-Item .env.example .env }
 docker compose up -d --wait
 if (!(Test-Path ..\.venv\Scripts\python.exe)) { py -3 -m venv ..\.venv }
@@ -33,10 +32,10 @@ if (!(Test-Path ..\.venv\Scripts\python.exe)) { py -3 -m venv ..\.venv }
 ..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 --no-proxy-headers --timeout-keep-alive 5 --limit-concurrency 200 --limit-max-requests 5000 --backlog 512 --no-access-log
 ```
 
-Open a second terminal for the frontend.
+Open a second terminal at the repository root for the frontend.
 
 ```powershell
-Set-Location D:\qlct\frontend
+Set-Location frontend
 if (!(Test-Path .env)) { Copy-Item .env.example .env }
 npm.cmd ci
 npm.cmd run tauri dev
@@ -44,13 +43,18 @@ npm.cmd run tauri dev
 
 Use `npm.cmd run dev` in place of the final command for the browser build.
 
+The group receipt API issues a signed storage URL for each upload. Clients send the receipt bytes directly to storage, up to 5 MB per file, and then submit the upload ID to the API.
+
 ## Verify a running stack
 
+Run these commands from the repository root.
+
 ```powershell
-Set-Location D:\qlct\backend
+Set-Location backend
 ..\.venv\Scripts\python.exe -m pytest
 ..\.venv\Scripts\python.exe -m scripts.smoke_living
-Set-Location D:\qlct\frontend
+Set-Location ..
+Set-Location frontend
 npm.cmd test
 npm.cmd run build
 ```

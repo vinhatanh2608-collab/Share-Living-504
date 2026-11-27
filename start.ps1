@@ -70,6 +70,9 @@ try {
 $port8000 = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
 if (-not $port8000) {
     Write-Host "[3/4] Dang bat Backend FastAPI (cong 8000)..." -ForegroundColor Green
+    # Keep Uvicorn at one worker (--workers 1 without --reload). Rate-limit counters,
+    # WebSocket mute and connection state, and circuit breakers require shared state
+    # and WebSocket event delivery (for example, Redis) to support multiple workers.
     Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoExit", "-Command", "cd '$BackendDir'; & '$VenvUvicorn' app.main:app --reload --host 127.0.0.1 --port 8000 --ws-max-size 4096 --no-proxy-headers --timeout-keep-alive 5 --limit-concurrency 200 --limit-max-requests 5000 --backlog 512 --no-access-log"
     for ($i = 0; $i -lt 25; $i++) {
         Start-Sleep -Seconds 1

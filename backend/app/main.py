@@ -18,7 +18,7 @@ from .api import (routes_advisor, routes_auth, routes_chat, routes_finance, rout
 from .core.flood_guard import FloodGuard
 from .core.config import settings
 from .core.database import Resources
-from .core.request_security import RECEIPT_LIMIT, RequestSecurity, is_receipt_path
+from .core.request_security import RequestSecurity, is_receipt_path
 from .core.security import passwords
 from .services.finance_service import deliver_forever
 from .services.ws_manager import Manager
@@ -93,7 +93,7 @@ def create_app(legacy_room=None, config=None):
         try:
             response = await call_next(request)
         except Exception:
-            logger.error("Unhandled backend request error", exc_info=True)
+            logger.exception("Unhandled backend error for %s %s", request.method, request.url.path)
             response = JSONResponse({"detail": "Internal server error"}, status_code=500)
         return response
 
@@ -101,7 +101,8 @@ def create_app(legacy_room=None, config=None):
                        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
                        allow_headers=["Authorization", "Content-Type"], expose_headers=["Retry-After"])
     app.add_middleware(RequestSecurity, config=cfg)
-    app.add_middleware(FloodGuard, capacity=cfg.max_inflight_requests, header_limit=cfg.max_header_bytes)
+    app.add_middleware(FloodGuard, capacity=cfg.max_inflight_requests, header_limit=cfg.max_header_bytes,
+                       cors_origins=cfg.cors_origins)
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation(request, error):
@@ -110,21 +111,21 @@ def create_app(legacy_room=None, config=None):
                 if item["loc"] == ("body", "content_type"):
                     return JSONResponse({"detail": "Only JPEG, PNG and WebP receipts are allowed"}, status_code=400)
                 if item["loc"] == ("body", "size") and item["type"] == "less_than_equal":
-                    status = 413 if type(item.get("input")) is int and item["input"] > RECEIPT_LIMIT else 400
-                    return JSONResponse({"detail": "Receipt exceeds the upload limit"}, status_code=status)
+                    return JSONResponse({"detail": "Receipt exceeds the upload limit"}, status_code=413)
         fields = ("loc", "msg", "type")
         return JSONResponse({"detail": [{field: item[field] for field in fields} for item in error.errors()]},
                             status_code=422)
 
     @app.exception_handler(PyMongoError)
-    async def handle_mongo(_request, _error):
+    async def handle_mongo(request, error):
+        logger.error("Document storage unavailable for %s %s", request.method, request.url.path, exc_info=error)
         return JSONResponse({"detail": "Document storage unavailable"}, status_code=503)
 
     @app.exception_handler(SQLAlchemyError)
-    async def handle_sql(_request, error):
+    async def handle_sql(request, error):
+        logger.error("Database request failed for %s %s", request.method, request.url.path, exc_info=error)
         if isinstance(error, (OperationalError, InterfaceError, PoolTimeout)) or getattr(error, "connection_invalidated", False):
             return JSONResponse({"detail": "Database temporarily unavailable. Try again shortly."}, status_code=503)
-        logger.error("Database request failed", exc_info=error)
         return JSONResponse({"detail": "Internal server error"}, status_code=500)
 
     @app.get("/health/live", include_in_schema=False)

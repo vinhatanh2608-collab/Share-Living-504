@@ -26,7 +26,7 @@ export default function QrDirectoryPage({ user }: { user: User }) {
   }
   async function save(e: FormEvent) {
     e.preventDefault(); setError(""); setBusy(true);
-    try { await api.put("/auth/me/vietqr", bank); setBank(undefined); void refresh(user.is_owner); }
+    try { await api.put("/auth/me/vietqr", bank); setBank(undefined); void refresh(); }
     catch (e) { setError(explain(e)); } finally { setBusy(false); }
   }
   return <div className="page"><header className="page-header"><div><p className="eyebrow">PAYMENTS DIRECTORY</p><h1>VietQR directory</h1>

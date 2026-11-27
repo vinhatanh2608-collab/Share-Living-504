@@ -27,7 +27,7 @@ function Workspace({ user, token }: { user: User; token: string }) {
   const [notice, setNotice] = useState("");
   const [alerts, setAlerts] = useState(false);
   const action = useAction();
-  const status = useRealtimeStore(state => state.status);
+  const { status, error: realtimeError } = useRealtimeStore();
   const reload = useCallback(() => setRevision(value => value + 1), []);
   const groups = useResource<Group[]>("/groups", revision);
   const available = groups.data?.filter(group => group.status === "APPROVED") ?? [];
@@ -64,7 +64,7 @@ function Workspace({ user, token }: { user: User; token: string }) {
           const allowed = await enableAlerts(); setAlerts(allowed); setNotice(allowed ? "Desktop alerts enabled." : "Alerts were declined.");
         })}><Bell size={17} />{alerts ? "Alerts enabled" : "Enable alerts"}</button>
       </header>
-      {status !== "online" && <p className="app-notice" role="status">Live updates are reconnecting. Displayed data may be out of date.</p>}
+      {status !== "online" && <p className="app-notice" role="status">{realtimeError || "Đang kết nối lại để nhận cập nhật trực tiếp. Dữ liệu hiển thị có thể chưa mới nhất."}</p>}
       {notice && <div className="app-notice" role="status">{notice}<button className="secondary" onClick={() => setNotice("")}>Dismiss</button></div>}
       {(groups.error || action.error) && <p className="error" role="alert">{groups.error || action.error}</p>}
       {page === "overview" && <Suspense fallback={<p role="status">Loading the overview…</p>}>

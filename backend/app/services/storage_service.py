@@ -3,15 +3,19 @@ from io import BytesIO
 from uuid import UUID, uuid4
 import re
 import asyncio
+import logging
 from threading import BoundedSemaphore
 from time import monotonic
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, BotoCoreError
 from fastapi import HTTPException
-from PIL import Image
+from PIL import Image, ImageOps
 from ..core.config import settings
 from ..core.request_security import RECEIPT_LIMIT
+
+
+logger = logging.getLogger(__name__)
 
 
 PROOF_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
@@ -71,7 +75,8 @@ def sanitize_image(data):
                 raise ValueError
             image.verify()
         with Image.open(BytesIO(data), formats=[fmt]) as image:
-            pixels = image.convert("RGB" if fmt == "JPEG" else "RGBA")
+            with ImageOps.exif_transpose(image) as upright:
+                pixels = upright.convert("RGB" if fmt == "JPEG" else "RGBA")
             pixels.info.clear()
             output = BytesIO()
             pixels.save(output, format=fmt)
@@ -85,6 +90,7 @@ storage_slots = BoundedSemaphore(4)
 
 async def storage_call(operation):
     if not storage_slots.acquire(blocking=False):
+        logger.warning("Object storage admission rejected: concurrency limit")
         raise HTTPException(503, "Object storage busy", headers={"Retry-After": "1"})
     task = asyncio.create_task(asyncio.to_thread(operation))
 
@@ -98,6 +104,7 @@ async def storage_call(operation):
         async with asyncio.timeout(25):
             return await asyncio.shield(task)
     except TimeoutError as exc:
+        logger.exception("Object storage operation timed out")
         raise HTTPException(503, "Object storage timed out") from exc
 
 
@@ -119,6 +126,7 @@ async def presign(operation, parameters, ttl=300):
             lambda: client(True).generate_presigned_url(
                 operation, Params={"Bucket": settings().s3_bucket, **parameters}, ExpiresIn=ttl))
     except (BotoCoreError, ClientError) as exc:
+        logger.exception("Object storage signing failed")
         raise HTTPException(503, "Object storage unavailable") from exc
 
 
@@ -191,8 +199,10 @@ async def finalize(user_id, namespace, upload_id, types, limit):
         status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
         if status in {404, 412}:
             raise HTTPException(409, "Upload missing or changed; upload again") from exc
+        logger.exception("Object storage finalization failed")
         raise HTTPException(503, "Object storage unavailable") from exc
     except BotoCoreError as exc:
+        logger.exception("Object storage finalization failed")
         raise HTTPException(503, "Object storage unavailable") from exc
 
 

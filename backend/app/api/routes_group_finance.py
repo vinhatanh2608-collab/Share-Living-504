@@ -175,10 +175,11 @@ async def submit_receipt(group_id: int, data: ReceiptSubmit, request: Request, a
         return {"id": proof.id, "status": proof.status}
 
 
-async def authorized_proof(sql, group_id, proof_id, actor_id, lock=False):
+async def authorized_proof(sql, group_id, proof_id, actor_id, *, review=False):
     await approved_member(sql, group_id, actor_id)
-    proof = await sql.get(GroupProof, proof_id, with_for_update=lock)
-    if not proof or proof.group_id != group_id or actor_id not in (proof.creditor_id, proof.debtor_id):
+    query = select(GroupProof).where(GroupProof.id == proof_id, GroupProof.group_id == group_id)
+    proof = await sql.scalar(query.with_for_update() if review else query)
+    if not proof or (not review and actor_id not in (proof.creditor_id, proof.debtor_id)):
         raise HTTPException(404, "Receipt not found")
     return proof
 
@@ -192,14 +193,14 @@ async def get_receipt(group_id: int, proof_id: int, request: Request, actor: Act
 
 @router.patch("/proofs/{proof_id}/verify")
 async def verify_receipt(group_id: int, proof_id: int, data: VerifyIn, request: Request, actor: Actor):
-    if data.decision == "REJECT" and data.reject_reason is None:
-        raise HTTPException(422, "Enter a reason for rejection")
     status = "PAID" if data.decision == "APPROVE" else "REJECTED"
     async with request.app.state.resources.sql.begin() as sql:
         await lock_group(sql, group_id, actor.id)
-        proof = await authorized_proof(sql, group_id, proof_id, actor.id, lock=True)
+        proof = await authorized_proof(sql, group_id, proof_id, actor.id, review=True)
         if proof.creditor_id != actor.id:
             raise HTTPException(403, "Only the creditor can verify this receipt")
+        if status == "REJECTED" and data.reject_reason is None:
+            raise HTTPException(422, "Enter a reason for rejection")
         reason = data.reject_reason if status == "REJECTED" else None
         if proof.status == status and proof.reject_reason == reason:
             return {"status": status}

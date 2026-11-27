@@ -1,5 +1,9 @@
 import asyncio
+import logging
 from time import monotonic
+
+
+logger = logging.getLogger(__name__)
 
 
 class CircuitBreaker:
@@ -16,6 +20,7 @@ class CircuitBreaker:
         self.generation = 0
 
     def trip(self):
+        logger.warning("Advisor circuit opened: failures=%d cooldown=%ss", self.failures, self.cooldown)
         self.state = "OPEN"
         self.opened = monotonic()
         self.generation += 1

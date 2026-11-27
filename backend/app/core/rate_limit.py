@@ -39,7 +39,7 @@ def identity(scope):
             return ("user", int(claims(header[7:])["sub"]))
         except (jwt.InvalidTokenError, ValueError, KeyError, TypeError):
             pass
-    return ("ip", scope["client"][0])
+    return ("ip", (scope.get("client") or ("unknown",))[0])
 
 
 def resolve_proxy(scope, networks):

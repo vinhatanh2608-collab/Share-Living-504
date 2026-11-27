@@ -23,7 +23,7 @@ $proxyPeer = docker network inspect backend_default --format '{{(index .IPAM.Con
 docker run -d --name shared-living-api --network backend_default --restart unless-stopped --env-file .env -e ("TRUSTED_PROXY_IPS=" + (ConvertTo-Json -InputObject @($proxyPeer, "127.0.0.1") -Compress)) -p 127.0.0.1:8000:8000 shared-living-api
 ```
 
-Restrict port 8000 to the proxy host. For the example Docker bridge, Uvicorn trusts the bridge gateway and loopback. If Docker or Caddy uses a different network arrangement, set `TRUSTED_PROXY_IPS` to the exact peer addresses seen by Uvicorn. Avoid wildcard proxy trust. Run one API worker so the WebSocket hub and in-memory limits are shared.
+Restrict port 8000 to the proxy host. For the example Docker bridge, Uvicorn trusts the bridge gateway and loopback. If Docker or Caddy uses a different network arrangement, set `TRUSTED_PROXY_IPS` to the exact peer addresses seen by Uvicorn. Avoid wildcard proxy trust. Run Uvicorn with `--workers 1`. Rate-limit counters, WebSocket mute and connection state, the WebSocket hub, and circuit breakers live in process memory. Multiple workers require shared state and WebSocket event delivery through a service such as Redis.
 
 ## Domain and TLS
 

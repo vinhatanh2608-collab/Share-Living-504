@@ -27,7 +27,7 @@ export function mergeMessages(current: Message[], incoming: Message[]) {
 type Room = {
   roommates: Roommate[]; debts: Debt[]; proofs: PendingProof[]; messages: Message[];
   cursor: string | null; unread: number; chatOpen: boolean; error: string; loading: boolean;
-  refresh(owner: boolean): Promise<void>; history(older?: boolean): Promise<void>;
+  refresh(): Promise<void>; history(older?: boolean): Promise<void>;
   ingest(message: Message): void; chatActive(value: boolean): void; reset(): void;
 };
 const empty = { roommates: [], debts: [], proofs: [], messages: [], cursor: null, unread: 0, error: "", loading: false, chatOpen: false };
@@ -37,7 +37,7 @@ let liveAbort: AbortController | undefined;
 let historyBusy = false;
 export const useRoomStore = create<Room>((set, get) => ({
   ...empty,
-  async refresh(owner) {
+  async refresh() {
     const epoch = lifecycle;
     const refresh = ++latestRefresh;
     liveAbort?.abort();
@@ -47,7 +47,7 @@ export const useRoomStore = create<Room>((set, get) => ({
     try {
       const [directory, debts, proofs] = await Promise.all([
         api.get<Roommate[]>("/auth/roommates", { signal }),
-        all<Debt>("/finance/debts", signal), owner ? all<PendingProof>("/finance/proofs/pending", signal) : [],
+        all<Debt>("/finance/debts", signal), all<PendingProof>("/finance/proofs/pending", signal),
       ]);
       if (epoch === lifecycle && refresh === latestRefresh) set({ roommates: directory.data, debts, proofs, loading: false });
     } catch (e) {

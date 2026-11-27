@@ -55,13 +55,14 @@ class API(unittest.TestCase):
         return self.client.post("/finance/proofs/1/decision", json={"approve": True},
                                 headers={"Authorization": f"Bearer {issue(user)}"})
 
-    def test_creditor_cannot_approve(self):
-        self.assertEqual(self.approve(3).status_code, 403)
+    def test_non_creditors_cannot_approve(self):
+        self.assertEqual(self.approve(1).status_code, 403)
+        self.assertEqual(self.approve(2).status_code, 403)
         self.assertEqual(asyncio.run(self.read_state()), ("pending", []))
 
-    def test_owner_approves_once_and_records_outbox(self):
-        self.assertEqual(self.approve(1).json(), {"id": 1, "status": "paid"})
-        self.assertEqual(self.approve(1).status_code, 200)
+    def test_creditor_approves_once_and_records_outbox(self):
+        self.assertEqual(self.approve(3).json(), {"id": 1, "status": "paid"})
+        self.assertEqual(self.approve(3).status_code, 200)
         state, events = asyncio.run(self.read_state())
         self.assertEqual(state, "paid")
         self.assertEqual(events, [{"proof_id": 1, "debt_id": 1, "status": "paid",
