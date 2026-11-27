@@ -48,14 +48,14 @@ export default function GroupHubPage({ groups, active, select, revision, reload,
     {(action.error || directory.error) && <p className="error" role="alert">{action.error || directory.error}</p>}
     {active && <>
       <div className="living-card living-row"><label className="living-check">
-        <input type="checkbox" role="switch" checked={active.auto_monthly_reminder}
+        <input type="checkbox" role="switch" checked={active.auto_monthly_reminder ?? true}
           disabled={active.role !== "OWNER" || action.busy} onChange={event => {
             const enabled = event.currentTarget.checked;
             void action.run(async () => {
               await api.patch(`/groups/${active.id}/reminder-settings`, { auto_monthly_reminder: enabled });
               setNotice(enabled ? "Đã bật nhắc nợ cuối tháng." : "Đã tắt nhắc nợ cuối tháng.");
             });
-          }}/> Tự động nhắc nợ cuối tháng ({String(active.reminder_hour).padStart(2, "0")}:00 ngày cuối tháng)
+          }}/> Tự động nhắc nợ cuối tháng ({String(active.reminder_hour ?? 20).padStart(2, "0")}:00 ngày cuối tháng)
         </label>{active.role === "OWNER" && <button className="secondary" disabled={action.busy}
           onClick={() => void action.run(async () => {
             const { data } = await api.post<{ status: string }>(`/groups/${active.id}/reminders/run-monthly`);

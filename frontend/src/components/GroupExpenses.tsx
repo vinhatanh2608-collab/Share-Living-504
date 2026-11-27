@@ -9,7 +9,7 @@ const labels: Record<Category, string> = {
 const states = { paid: "Đã góp tiền", unpaid: "Chưa góp tiền", excluded: "Không liên quan" } as const;
 type Status = keyof typeof states;
 type Expense = { id: number; title: string; category: Category; amount: number; creditor_id: number;
-  created_at: string; participants: { user_id: number; status: Status; paid_amount: number; share_amount: number }[] };
+  created_at: string; participants?: { user_id: number; status: Status; paid_amount: number; share_amount: number }[] | null };
 type Props = { groupId: number; userId: number; members: Member[]; revision: number; reload: () => void };
 
 export default function GroupExpenses(props: Props) {
@@ -111,9 +111,10 @@ function ExpensePanel({ groupId, userId, members, revision, reload }: Props) {
       {ledger.data?.length === 0 && <p>Chưa có khoản chi chung.</p>}
       {ledger.data?.map(row => <details key={row.id}>
         <summary><strong>{row.title}</strong> · {vnd(row.amount)}<br />
-          {labels[row.category]} · {row.participants.filter(p => p.status === "paid").map(p => name(p.user_id)).join(", ")} đã góp · {new Date(row.created_at + (/(Z|[+-]\d\d:\d\d)$/i.test(row.created_at) ? "" : "Z"))
+          {labels[row.category]} · {row.participants?.filter(p => p.status === "paid").map(p => name(p.user_id)).join(", ") || "Chưa có thông tin người góp"} · {new Date(row.created_at + (/(Z|[+-]\d\d:\d\d)$/i.test(row.created_at) ? "" : "Z"))
             .toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", dateStyle: "short", timeStyle: "short" })}</summary>
-        <ul>{row.participants.map(p => <li key={p.user_id}>{name(p.user_id)} · {states[p.status]}
+        {!row.participants?.length && <p>Chưa có chi tiết chia chi phí.</p>}
+        <ul>{row.participants?.map(p => <li key={p.user_id}>{name(p.user_id)} · {states[p.status]}
           {p.status !== "excluded" && ` · Góp ${vnd(p.paid_amount)} · Chịu ${vnd(p.share_amount)}`}</li>)}</ul>
       </details>)}
     </section>

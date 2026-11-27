@@ -70,11 +70,12 @@ export function ProofReview({ groupId, proofId, creditor, close, reload }: {
   </Modal>;
 }
 
-type Quote = { amount: number; qr_url: string | null; bank: Bank | null; transfer_description: string };
-type Transfer = { debtor_id: number; creditor_id: number; amount: number; explanation_summary: string; chain_steps: string[] };
+type Quote = { amount: number; qr_url?: string | null; bank?: Bank | null; transfer_description?: string | null };
+type Transfer = { debtor_id: number; creditor_id: number; amount: number; explanation_summary?: string | null; chain_steps?: string[] | null };
 type Balance = { user_id: number; total_contributed: number; total_share: number; total_settled: number; net_balance: number };
-type Simplification = { transfers: Transfer[]; member_breakdown: Balance[]; original_count: number; simplified_count: number;
-  pending: { proof_id: number; debtor_id: number; creditor_id: number; amount: number }[] };
+type Simplification = { transfers?: Transfer[] | null; member_breakdown?: Balance[] | null;
+  original_count?: number | null; simplified_count?: number | null;
+  pending?: { proof_id: number; debtor_id: number; creditor_id: number; amount: number }[] | null };
 type PaymentSelection = { target: { debt_ids: number[] } | { transfer: { creditor_id: number; amount: number } };
   name: string; amount: number; initialTab: "qr" | "proof" };
 
@@ -140,6 +141,7 @@ function Payment({ groupId, selection, close, reload }: {
     });
   }
   const url = quote?.qr_url && vietQrUrl(quote.qr_url);
+  const description = quote?.transfer_description;
   return <Modal title="Thanh toán khoản nợ" close={close} busy={action.busy}>
     <div className="form">
       <div className="living-row"><span>Người nhận · {name}</span><strong>{vnd(quote?.amount ?? amount)}</strong></div>
@@ -155,7 +157,7 @@ function Payment({ groupId, selection, close, reload }: {
           ["Số tài khoản", quote.bank.bank_account_no], ["Chủ tài khoản", quote.bank.bank_account_name],
         ].map(([label, value]) => <div className="living-row" key={label}><span>{label} · {value}</span>
           <button className="icon" aria-label={`Sao chép ${label}`} onClick={() => void copy(value, label.toLowerCase())}><Copy size={16}/></button></div>)}</div>}
-        {quote?.transfer_description && <div className="living-row"><span>Nội dung · {quote.transfer_description}</span><button className="icon" aria-label="Sao chép nội dung" onClick={() => void copy(quote.transfer_description, "nội dung")}><Copy size={16}/></button></div>}
+        {description && <div className="living-row"><span>Nội dung · {description}</span><button className="icon" aria-label="Sao chép nội dung" onClick={() => void copy(description, "nội dung")}><Copy size={16}/></button></div>}
         {copied && <p role="status">{copied}</p>}
         <button className="primary" onClick={() => setTab("proof")}>Đã chuyển khoản — Nộp ảnh xác minh</button>
       </> : <form className="form" onSubmit={event => { event.preventDefault(); submit(); }}>
@@ -199,7 +201,9 @@ export default function SmartDebtsAndQrPage({ group, userId, revision, reload, m
     setPayment({ target: { transfer: { creditor_id: edge.creditor_id, amount: edge.amount } },
       name: nameOf(edge.creditor_id), amount: edge.amount, initialTab });
   }
-  const balance = simplified.data?.member_breakdown.find(member => member.user_id === userId);
+  const transfers = simplified.data?.transfers ?? [];
+  const pendingTransfers = simplified.data?.pending ?? [];
+  const balance = simplified.data?.member_breakdown?.find(member => member.user_id === userId);
   const net = balance?.net_balance;
   return <section className="living-stack"><h2>Nhắc nợ thông minh</h2>
     {[debts.error, simplified.error, directory.error, action.error].filter(Boolean).map((error, index) => <p className="error" role="alert" key={index}>{error}</p>)}
@@ -212,16 +216,17 @@ export default function SmartDebtsAndQrPage({ group, userId, revision, reload, m
     {simplified.loading && !simplified.data && <p role="status">Đang tính công nợ…</p>}
     {simplified.data && <>
       <div className="living-row"><strong className="pill">Đã tự động cấn trừ nợ chéo</strong>
-        <span>Rút gọn từ {simplified.data.original_count} khoản nợ xuống còn {simplified.data.simplified_count} lần chuyển khoản</span></div>
+        {simplified.data.original_count != null && <span>Rút gọn từ {simplified.data.original_count} khoản nợ xuống còn {simplified.data.simplified_count ?? transfers.length} lần chuyển khoản</span>}</div>
       <div className="living-grid group-debt-columns">{[true, false].map(outgoing => {
-        const items = simplified.data!.transfers.filter(edge => (outgoing ? edge.debtor_id : edge.creditor_id) === userId);
-        const pending = simplified.data!.pending.filter(edge => (outgoing ? edge.debtor_id : edge.creditor_id) === userId);
+        const items = transfers.filter(edge => (outgoing ? edge.debtor_id : edge.creditor_id) === userId);
+        const pending = pendingTransfers.filter(edge => (outgoing ? edge.debtor_id : edge.creditor_id) === userId);
         return <section className="living-stack" key={String(outgoing)}><h3>{outgoing ? "Khoản bạn cần trả" : "Khoản cần thu hồi"}</h3>
           {!items.length && !pending.length && <p>{outgoing ? "Bạn không cần chuyển khoản." : "Bạn không còn khoản phải thu."}</p>}
           {items.map(edge => <article className="living-card" key={`${edge.debtor_id}-${edge.creditor_id}`}>
             <div className="living-row"><strong>{nameOf(outgoing ? edge.creditor_id : edge.debtor_id)}</strong><strong>{vnd(edge.amount)}</strong></div>
-            <p>{edge.explanation_summary}</p><details><summary>Xem chi tiết cách tính</summary>
-              <ul>{edge.chain_steps.map((step, index) => <li key={index}>{step}</li>)}</ul>
+            <p>{edge.explanation_summary ?? "Số tiền cần chuyển sau khi cấn trừ công nợ trong nhóm."}</p><details><summary>Xem chi tiết cách tính</summary>
+              {edge.chain_steps?.length ? <ul>{edge.chain_steps.map((step, index) => <li key={index}>{step}</li>)}</ul> :
+                <p>Chưa có thông tin chi tiết cho khoản chuyển này.</p>}
               {balance && <dl>{[["Đã ứng trước", balance.total_contributed], ["Phần phải chia", balance.total_share],
                 ["Đã thanh toán", balance.total_settled], ["Còn lại", balance.net_balance]].map(([label, value]) =>
                   <div className="living-row" key={label}><dt>{label}</dt><dd>{vnd(Number(value))}</dd></div>)}</dl>}
@@ -259,7 +264,10 @@ export default function SmartDebtsAndQrPage({ group, userId, revision, reload, m
               const { data } = await api.post<{ notified: number }>(`${path}/debts/remind`, { debt_ids: [row.id] });
               setNotice(data.notified ? "Đã gửi nhắc nợ." : "Chưa gửi thêm lời nhắc. Bạn có thể thử lại sau 24 giờ.");
             })}>Gửi nhắc nợ</button>}
-            {row.proof_id !== null && <button className="secondary" onClick={() => setProof({ id: row.proof_id!, creditor: !outgoing })}>
+            {typeof row.proof_id === "number" && <button className="secondary" onClick={() => {
+              const id = row.proof_id;
+              if (typeof id === "number") setProof({ id, creditor: !outgoing });
+            }}>
               {!outgoing && row.status === "PENDING" ? "Xem & duyệt biên lai" : "Xem biên lai"}</button>}
           </div></article>)}
         {outgoing && chosen.length > 0 && <button className="primary" onClick={() => pay(chosen, "qr")}>Thanh toán gộp {chosen.length} khoản · {vnd(chosen.reduce((sum, row) => sum + row.amount, 0))}</button>}
