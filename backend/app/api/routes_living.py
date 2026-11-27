@@ -32,7 +32,8 @@ def qr(member):
 def group_view(group, member):
     return {"id": group.id, "name": group.name, "code": group.code if member.status == "APPROVED" else None,
             "role": "OWNER" if group.owner_id == member.user_id else "MEMBER", "status": member.status,
-            "qr_ready": bool(member.bank_bin)}
+            "qr_ready": bool(member.bank_bin), "auto_monthly_reminder": group.auto_monthly_reminder,
+            "reminder_hour": group.reminder_hour, "last_reminded_period": group.last_reminded_period}
 
 
 @router.post("/auth/register", status_code=201)

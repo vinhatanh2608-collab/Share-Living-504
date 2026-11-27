@@ -14,6 +14,16 @@ def initialize_mysql_schema(connection):
     inspector = inspect(connection)
     if "note" not in {column["name"] for column in inspector.get_columns("group_payment_proofs")}:
         connection.execute(text("ALTER TABLE group_payment_proofs ADD COLUMN note VARCHAR(300) NULL"))
+    group_columns = {column["name"] for column in inspector.get_columns("living_groups")}
+    for name, definition in (
+        ("auto_monthly_reminder", "BOOLEAN NOT NULL DEFAULT 1"),
+        ("reminder_hour", "INTEGER NOT NULL DEFAULT 20"),
+        ("last_reminded_period", "VARCHAR(7) NULL"),
+    ):
+        if name not in group_columns:
+            connection.execute(text(f"ALTER TABLE living_groups ADD COLUMN {name} {definition}"))
+    if "transfer_amount" not in {column["name"] for column in inspector.get_columns("group_payment_proofs")}:
+        connection.execute(text("ALTER TABLE group_payment_proofs ADD COLUMN transfer_amount BIGINT NULL"))
     # create_all skips indexes on tables that already exist.
     for index in PERFORMANCE_INDEXES:
         existing = inspector.get_indexes(index.table.name)

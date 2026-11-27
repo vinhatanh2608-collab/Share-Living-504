@@ -71,13 +71,18 @@ export function ProofReview({ groupId, proofId, creditor, close, reload }: {
 }
 
 type Quote = { amount: number; qr_url: string | null; bank: Bank | null; transfer_description: string };
-type PaymentSelection = { ids: number[]; name: string; amount: number; initialTab: "qr" | "proof" };
+type Transfer = { debtor_id: number; creditor_id: number; amount: number; explanation_summary: string; chain_steps: string[] };
+type Balance = { user_id: number; total_contributed: number; total_share: number; total_settled: number; net_balance: number };
+type Simplification = { transfers: Transfer[]; member_breakdown: Balance[]; original_count: number; simplified_count: number;
+  pending: { proof_id: number; debtor_id: number; creditor_id: number; amount: number }[] };
+type PaymentSelection = { target: { debt_ids: number[] } | { transfer: { creditor_id: number; amount: number } };
+  name: string; amount: number; initialTab: "qr" | "proof" };
 
 function Payment({ groupId, selection, close, reload }: {
   groupId: number; selection: PaymentSelection; close: () => void; reload: () => void;
 }) {
   const path = `/groups/${groupId}`;
-  const { ids, name, amount } = selection;
+  const { target, name, amount } = selection;
   const [tab, setTab] = useState<"qr" | "proof">(selection.initialTab);
   const [quote, setQuote] = useState<Quote>();
   const [quoteError, setQuoteError] = useState("");
@@ -91,11 +96,11 @@ function Payment({ groupId, selection, close, reload }: {
   const action = useAction(() => { reload(); close(); });
   useEffect(() => {
     const controller = new AbortController();
-    void api.post<Quote>(`${path}/debts/qr`, { debt_ids: ids }, { signal: controller.signal })
+    void api.post<Quote>(`${path}/debts/qr`, target, { signal: controller.signal })
       .then(response => { if (!controller.signal.aborted) setQuote(response.data); })
       .catch(error => { if (!controller.signal.aborted) setQuoteError(explain(error)); });
     return () => controller.abort();
-  }, [path, ids]);
+  }, [path, target]);
   useEffect(() => {
     setPreview("");
     if (!file) return;
@@ -126,12 +131,12 @@ function Payment({ groupId, selection, close, reload }: {
       if (!uploadId) {
         const mime = await receiptMime(file);
         if (!mime || file.type !== mime) throw new Error("Ảnh biên lai không hợp lệ.");
-        const { data } = await api.post<Ticket>(`${path}/proofs/upload`, { debt_ids: ids, size: file.size, content_type: mime });
+        const { data } = await api.post<Ticket>(`${path}/proofs/upload`, { ...target, size: file.size, content_type: mime });
         await upload(data, file);
         uploadId = data.upload_id;
         setUploaded(uploadId);
       }
-      await api.post(`${path}/proofs`, { debt_ids: ids, upload_id: uploadId, note: note.trim() || null });
+      await api.post(`${path}/proofs`, { ...target, upload_id: uploadId, note: note.trim() || null });
     });
   }
   const url = quote?.qr_url && vietQrUrl(quote.qr_url);
@@ -172,7 +177,7 @@ export default function SmartDebtsAndQrPage({ group, userId, revision, reload, m
 }) {
   const path = `/groups/${group.id}`;
   const debts = useResource<Debt[]>(`${path}/debts`, revision);
-  const summary = useResource<{ owed: number; receivable: number }>(`${path}/debts/summary`, revision);
+  const simplified = useResource<Simplification>(`${path}/debts/simplified`, revision);
   const directory = useResource<Member[]>(members ? null : `${path}/members`, revision);
   const people = members ?? directory.data ?? [];
   const [selected, setSelected] = useState<number[]>([]);
@@ -187,19 +192,56 @@ export default function SmartDebtsAndQrPage({ group, userId, revision, reload, m
   const names = new Map(people.map(member => [member.id, member.name]));
   const nameOf = (id: number) => names.get(id) ?? `Thành viên #${id}`;
   function pay(items: Debt[], initialTab: PaymentSelection["initialTab"]) {
-    setPayment({ ids: items.map(item => item.id), name: nameOf(items[0].creditor_id),
+    setPayment({ target: { debt_ids: items.map(item => item.id) }, name: nameOf(items[0].creditor_id),
       amount: items.reduce((sum, item) => sum + item.amount, 0), initialTab });
   }
-  const net = summary.data && summary.data.receivable - summary.data.owed;
+  function payTransfer(edge: Transfer, initialTab: PaymentSelection["initialTab"]) {
+    setPayment({ target: { transfer: { creditor_id: edge.creditor_id, amount: edge.amount } },
+      name: nameOf(edge.creditor_id), amount: edge.amount, initialTab });
+  }
+  const balance = simplified.data?.member_breakdown.find(member => member.user_id === userId);
+  const net = balance?.net_balance;
   return <section className="living-stack"><h2>Nhắc nợ thông minh</h2>
-    {[debts.error, summary.error, directory.error, action.error].filter(Boolean).map((error, index) => <p className="error" role="alert" key={index}>{error}</p>)}
+    {[debts.error, simplified.error, directory.error, action.error].filter(Boolean).map((error, index) => <p className="error" role="alert" key={index}>{error}</p>)}
     {notice && <p role="status">{notice}</p>}
     <div className="group-balances">
-      <div className="living-card"><span>Tôi cần trả</span><h3>{summary.data ? vnd(summary.data.owed) : "…"}</h3></div>
-      <div className="living-card"><span>Tôi cần thu</span><h3>{summary.data ? vnd(summary.data.receivable) : "…"}</h3></div>
+      <div className="living-card"><span>Tôi cần trả</span><h3>{net === undefined ? "…" : vnd(Math.max(0, -net))}</h3></div>
+      <div className="living-card"><span>Tôi cần thu</span><h3>{net === undefined ? "…" : vnd(Math.max(0, net))}</h3></div>
       <div className="living-card"><span>Số dư ròng</span><h3>{net === undefined ? "…" : vnd(net)}</h3></div>
     </div>
-    <div className="living-grid group-debt-columns">{[{ title: "Khoản bạn cần trả", outgoing: true, items: owed }, { title: "Khoản cần thu hồi", outgoing: false, items: receivable }].map(({ title, outgoing, items }) =>
+    {simplified.loading && !simplified.data && <p role="status">Đang tính công nợ…</p>}
+    {simplified.data && <>
+      <div className="living-row"><strong className="pill">Đã tự động cấn trừ nợ chéo</strong>
+        <span>Rút gọn từ {simplified.data.original_count} khoản nợ xuống còn {simplified.data.simplified_count} lần chuyển khoản</span></div>
+      <div className="living-grid group-debt-columns">{[true, false].map(outgoing => {
+        const items = simplified.data!.transfers.filter(edge => (outgoing ? edge.debtor_id : edge.creditor_id) === userId);
+        const pending = simplified.data!.pending.filter(edge => (outgoing ? edge.debtor_id : edge.creditor_id) === userId);
+        return <section className="living-stack" key={String(outgoing)}><h3>{outgoing ? "Khoản bạn cần trả" : "Khoản cần thu hồi"}</h3>
+          {!items.length && !pending.length && <p>{outgoing ? "Bạn không cần chuyển khoản." : "Bạn không còn khoản phải thu."}</p>}
+          {items.map(edge => <article className="living-card" key={`${edge.debtor_id}-${edge.creditor_id}`}>
+            <div className="living-row"><strong>{nameOf(outgoing ? edge.creditor_id : edge.debtor_id)}</strong><strong>{vnd(edge.amount)}</strong></div>
+            <p>{edge.explanation_summary}</p><details><summary>Xem chi tiết cách tính</summary>
+              <ul>{edge.chain_steps.map((step, index) => <li key={index}>{step}</li>)}</ul>
+              {balance && <dl>{[["Đã ứng trước", balance.total_contributed], ["Phần phải chia", balance.total_share],
+                ["Đã thanh toán", balance.total_settled], ["Còn lại", balance.net_balance]].map(([label, value]) =>
+                  <div className="living-row" key={label}><dt>{label}</dt><dd>{vnd(Number(value))}</dd></div>)}</dl>}
+            </details><div className="living-buttons">{outgoing ? <>
+              <button className="primary" onClick={() => payTransfer(edge, "qr")}>Thanh toán</button>
+              <button className="secondary" onClick={() => payTransfer(edge, "proof")}>Nộp ảnh xác minh</button></> :
+              <button className="secondary" disabled={action.busy} onClick={() => void action.run(async () => {
+                const { data } = await api.post<{ notified: number }>(`${path}/debts/remind`, { debtor_id: edge.debtor_id, amount: edge.amount });
+                setNotice(data.notified ? "Đã gửi nhắc nợ." : "Bạn có thể gửi lại lời nhắc sau 24 giờ.");
+              })}>Gửi nhắc nợ</button>}</div></article>)}
+          {pending.map(edge => <article className="living-card" key={edge.proof_id}>
+            <div className="living-row"><strong>{nameOf(outgoing ? edge.creditor_id : edge.debtor_id)}</strong><strong>{vnd(edge.amount)}</strong></div>
+            <span className="pill wait">Chờ chủ nợ duyệt</span>
+            <button className="secondary" onClick={() => setProof({ id: edge.proof_id, creditor: !outgoing })}>
+              {outgoing ? "Xem biên lai" : "Xem & duyệt biên lai"}</button></article>)}
+        </section>;
+      })}</div>
+    </>}
+    <details className="living-card"><summary>Chi tiết khoản nợ theo hóa đơn</summary>
+    <div className="living-grid group-debt-columns">{[{ title: "Hóa đơn phải trả", outgoing: true, items: owed }, { title: "Hóa đơn phải thu", outgoing: false, items: receivable }].map(({ title, outgoing, items }) =>
       <section className="living-stack" key={title}><h3>{title}</h3>
         {debts.loading && !debts.data && <p role="status">Đang tải khoản nợ…</p>}
         {debts.data && !items.length && <p>{outgoing ? "Bạn chưa có khoản phải trả." : "Bạn chưa có khoản phải thu."}</p>}
@@ -221,7 +263,7 @@ export default function SmartDebtsAndQrPage({ group, userId, revision, reload, m
               {!outgoing && row.status === "PENDING" ? "Xem & duyệt biên lai" : "Xem biên lai"}</button>}
           </div></article>)}
         {outgoing && chosen.length > 0 && <button className="primary" onClick={() => pay(chosen, "qr")}>Thanh toán gộp {chosen.length} khoản · {vnd(chosen.reduce((sum, row) => sum + row.amount, 0))}</button>}
-      </section>)}</div>
+      </section>)}</div></details>
     <details className="living-card"><summary>Danh bạ VietQR của nhóm</summary><Directory members={people} /></details>
     {payment && <Payment groupId={group.id} selection={payment} close={() => setPayment(undefined)} reload={() => { setSelected([]); reload(); }}/>}
     {proof && <ProofReview groupId={group.id} proofId={proof.id} creditor={proof.creditor} close={() => setProof(undefined)} reload={reload}/>}

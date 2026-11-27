@@ -14,13 +14,14 @@ from pymongo.errors import PyMongoError
 from sqlalchemy import text
 from sqlalchemy.exc import InterfaceError, OperationalError, SQLAlchemyError, TimeoutError as PoolTimeout
 from .api import (routes_advisor, routes_auth, routes_chat, routes_finance, routes_group_chat,
-                  routes_group_finance, routes_living, routes_study, routes_ws)
+                  routes_group_finance, routes_living, routes_monthly, routes_study, routes_ws)
 from .core.flood_guard import FloodGuard
 from .core.config import settings
 from .core.database import Resources
 from .core.request_security import RequestSecurity, is_receipt_path
 from .core.security import passwords
 from .services.finance_service import deliver_forever
+from .services.monthly_reminders import monthly_forever
 from .services.ws_manager import Manager
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ async def lifespan(app):
     cfg = settings()
     resources = Resources()
     task = None
+    monthly_task = None
     try:
         await resources.initialize_schema()
         await resources.mongo.command("ping")
@@ -49,6 +51,8 @@ async def lifespan(app):
         app.state.dummy_password = await asyncio.to_thread(passwords.hash, token_hex(32))
         task = asyncio.create_task(deliver_forever(resources, app.state.ws, cfg.owner_username)
                                    if app.state.legacy_room else routes_group_chat.project_forever(resources, app.state.ws))
+        if not app.state.legacy_room:
+            monthly_task = asyncio.create_task(monthly_forever(resources, app.state.ws))
         async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=3, write=5, pool=3),
                                      limits=httpx.Limits(max_connections=10), trust_env=False) as http:
             app.state.http = http
@@ -57,6 +61,10 @@ async def lifespan(app):
             storage_client(True)
             yield
     finally:
+        if monthly_task:
+            monthly_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await monthly_task
         if task:
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -85,7 +93,7 @@ def create_app(legacy_room=None, config=None):
         app.include_router(routes_auth.legacy_router)
         app.include_router(routes_auth.legacy_router, prefix="/api/v1", include_in_schema=False)
     else:
-        for api in (routes_living, routes_group_finance, routes_group_chat, routes_advisor):
+        for api in (routes_living, routes_group_finance, routes_group_chat, routes_advisor, routes_monthly):
             app.include_router(api.router, prefix="/api/v1")
 
     @app.middleware("http")

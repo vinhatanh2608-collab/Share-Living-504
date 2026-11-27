@@ -12,6 +12,20 @@ class LivingGroup(Base):
     code: Mapped[str] = mapped_column(String(20), unique=True)
     name: Mapped[str] = mapped_column(String(100))
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    auto_monthly_reminder: Mapped[bool] = mapped_column(default=True, server_default="1")
+    reminder_hour: Mapped[int] = mapped_column(default=20, server_default="20")
+    last_reminded_period: Mapped[str | None] = mapped_column(String(7))
+
+
+class MonthlyReminder(Base):
+    __tablename__ = "monthly_group_reminders"
+    group_id: Mapped[int] = mapped_column(ForeignKey("living_groups.id"), primary_key=True)
+    period: Mapped[str] = mapped_column(String(7), primary_key=True)
+    sender_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    transfers: Mapped[list] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(default=now)
+    delivered: Mapped[bool] = mapped_column(default=False)
+    next_attempt: Mapped[datetime] = mapped_column(default=now, index=True)
 
 
 class GroupMember(Base):
@@ -58,6 +72,15 @@ class GroupExpense(Base):
     created_at: Mapped[datetime] = mapped_column(default=now)
 
 
+class ExpenseParticipant(Base):
+    __tablename__ = "group_expense_participants"
+    expense_id: Mapped[int] = mapped_column(ForeignKey("group_expenses.id"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    status: Mapped[str] = mapped_column(String(8))
+    paid_amount: Mapped[int] = mapped_column(BigInteger)
+    share_amount: Mapped[int] = mapped_column(BigInteger)
+
+
 class GroupProof(Base):
     __tablename__ = "group_payment_proofs"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -68,6 +91,7 @@ class GroupProof(Base):
     object_key: Mapped[str] = mapped_column(String(255))
     debt_ids: Mapped[list[int]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(10), default="PENDING")
+    transfer_amount: Mapped[int | None] = mapped_column(BigInteger)
     note: Mapped[str | None] = mapped_column(String(300))
     reject_reason: Mapped[str | None] = mapped_column(String(300))
     created_at: Mapped[datetime] = mapped_column(default=now)
@@ -83,6 +107,14 @@ class DebtSplit(Base):
     status: Mapped[str] = mapped_column(String(10), default="UNPAID")
     proof_id: Mapped[int | None] = mapped_column(ForeignKey("group_payment_proofs.id"))
     reminded_at: Mapped[datetime | None]
+
+
+class ReminderCooldown(Base):
+    __tablename__ = "group_reminder_cooldowns"
+    group_id: Mapped[int] = mapped_column(ForeignKey("living_groups.id"), primary_key=True)
+    creditor_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    debtor_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    reminded_at: Mapped[datetime]
 
 
 class GroupReminder(Base):

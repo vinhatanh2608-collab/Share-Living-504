@@ -47,7 +47,21 @@ export default function GroupHubPage({ groups, active, select, revision, reload,
     {notice && <p className="app-notice" role="status">{notice}</p>}
     {(action.error || directory.error) && <p className="error" role="alert">{action.error || directory.error}</p>}
     {active && <>
-      <SmartDebtsAndQrPage group={active} members={members} userId={userId} revision={revision} reload={reload}/>
+      <div className="living-card living-row"><label className="living-check">
+        <input type="checkbox" role="switch" checked={active.auto_monthly_reminder}
+          disabled={active.role !== "OWNER" || action.busy} onChange={event => {
+            const enabled = event.currentTarget.checked;
+            void action.run(async () => {
+              await api.patch(`/groups/${active.id}/reminder-settings`, { auto_monthly_reminder: enabled });
+              setNotice(enabled ? "Đã bật nhắc nợ cuối tháng." : "Đã tắt nhắc nợ cuối tháng.");
+            });
+          }}/> Tự động nhắc nợ cuối tháng ({String(active.reminder_hour).padStart(2, "0")}:00 ngày cuối tháng)
+        </label>{active.role === "OWNER" && <button className="secondary" disabled={action.busy}
+          onClick={() => void action.run(async () => {
+            const { data } = await api.post<{ status: string }>(`/groups/${active.id}/reminders/run-monthly`);
+            setNotice(data.status === "empty" ? "Nhóm không có khoản nợ cần nhắc." : "Đã lập tổng kết và nhắc nợ trong trò chuyện nhóm.");
+          })}>Chốt sổ &amp; nhắc nợ ngay</button>}</div>
+      <SmartDebtsAndQrPage key={active.id} group={active} members={members} userId={userId} revision={revision} reload={reload}/>
       <GroupExpenses groupId={active.id} members={members} userId={userId} revision={revision} reload={reload}/>
       <section className="living-card"><h2><Users size={18}/> Thành viên và yêu cầu tham gia</h2>
         <div className="group-members">{members.filter(m => m.status === "APPROVED").map(m =>

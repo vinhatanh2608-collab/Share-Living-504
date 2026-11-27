@@ -14,6 +14,7 @@ from ..core.mongo_filters import lookup_id
 from ..models.living import GroupEvent, GroupMember, GroupProof, GroupReminder
 from ..models.mysql_models import now
 from ..schemas.living import ChatIn
+from ..services.monthly_reminders import project_monthly
 
 router = APIRouter(prefix="/groups/{group_id}/chat", tags=["group-chat"])
 logger = logging.getLogger(__name__)
@@ -113,7 +114,8 @@ async def project_forever(resources, manager):
     while True:
         try:
             reminded = await project_reminder(resources, manager)
-            if not await project_one(resources, manager) and not reminded:
+            monthly = await project_monthly(resources, manager)
+            if not await project_one(resources, manager) and not reminded and not monthly:
                 await asyncio.sleep(1)
         except SQLAlchemyError:
             logger.warning("Group outbox unavailable", exc_info=True)

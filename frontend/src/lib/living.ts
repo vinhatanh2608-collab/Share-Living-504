@@ -4,7 +4,8 @@ import { api, explain } from "./api";
 export const categories = ["FOOD", "TRANSPORT", "HOUSING", "STUDY", "ENTERTAINMENT", "OTHER"] as const;
 export type Category = typeof categories[number];
 export type Group = { id: number; name: string; code: string | null; role: "OWNER" | "MEMBER";
-  status: "PENDING" | "APPROVED" | "REJECTED"; qr_ready: boolean };
+  status: "PENDING" | "APPROVED" | "REJECTED"; qr_ready: boolean; auto_monthly_reminder: boolean;
+  reminder_hour: number; last_reminded_period: string | null };
 export type Bank = { bank_bin: string; bank_account_no: string; bank_account_name: string };
 export type Member = { id: number; name: string; status: Group["status"]; qr: Bank | null };
 export type Debt = { id: number; title: string; amount: number; status: "UNPAID" | "PENDING" | "PAID";
@@ -12,6 +13,8 @@ export type Debt = { id: number; title: string; amount: number; status: "UNPAID"
 export type ChatItem = { id: string; created_at: string; sender_id: number } & (
   { kind: "TEXT"; sender_name: string; text: string } |
   { kind: "DEBT_REMINDER"; sender_name: string; debtor_ids: number[] } |
+  { kind: "MONTHLY_REMINDER"; title: string; total_amount: number; transfers: {
+    debtor_id: number; debtor_name: string; creditor_id: number; creditor_name: string; amount: number }[] } |
   { kind: "PAYMENT_PROOF"; proof_id: number; creditor_id: number; status: string }
 );
 export type Budget = { category: Category; monthly_limit: number; spent: number };

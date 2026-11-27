@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
-import { type ChatItem, type Group, useAction, useResource } from "../lib/living";
+import { type ChatItem, type Group, useAction, useResource, vnd } from "../lib/living";
 import { ProofReview } from "./SmartDebtsAndQrPage";
 import SanitizedMessage from "../components/SanitizedMessage";
 
@@ -37,7 +37,13 @@ export default function GroupChatPage({ group, userId, revision, reload }: {
       {items.map(item => <article className="living-message" key={item.id}>
         <small>{new Date(item.created_at).toLocaleString()}</small>
         {item.kind === "TEXT" ? <><strong>{item.sender_name}</strong><SanitizedMessage text={item.text} /></> :
-          item.kind === "DEBT_REMINDER" ? <>
+          item.kind === "MONTHLY_REMINDER" ? <>
+            <strong>{item.title}</strong>
+            <p>{item.transfers.length} lần chuyển khoản · Tổng {vnd(item.total_amount)}</p>
+            <ul>{item.transfers.map(edge => <li key={`${edge.debtor_id}-${edge.creditor_id}`}>
+              {edge.debtor_name} chuyển cho {edge.creditor_name} · {vnd(edge.amount)}
+            </li>)}</ul>
+          </> : item.kind === "DEBT_REMINDER" ? <>
             <strong>Nhắc thanh toán</strong>
             <p>{item.sender_name} đã nhắc {item.debtor_ids.includes(userId) ? "bạn" : "thành viên trong nhóm"} thanh toán khoản còn nợ.</p>
           </> : <>

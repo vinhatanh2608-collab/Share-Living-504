@@ -4,12 +4,13 @@ from typing import Literal
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 
 from .deps import Actor
-from ..models.living import Budget, DebtSplit, GroupExpense, GroupMember, PersonalTransaction
+from ..models.living import Budget, DebtSplit, ExpenseParticipant, GroupExpense, GroupMember, PersonalTransaction
 from ..models.mysql_models import now
 from ..services.advisor import provider_reply
+from ..services.debt_simplifier import simplify_group
 
 router = APIRouter(tags=["analytics and advisor"])
 LOCAL = timezone(timedelta(hours=7))
@@ -55,11 +56,14 @@ async def summarize(sql, user_id, period, scope, *, include_personal_categories=
     group_window = (GroupExpense.group_id.in_(membership), GroupExpense.created_at >= utc_start(start),
                     GroupExpense.created_at < utc_start(end))
     if scope != "personal":
+        historical = ~select(ExpenseParticipant.user_id).where(ExpenseParticipant.expense_id == GroupExpense.id).exists()
         payer = select(GroupExpense.category, GroupExpense.created_at, GroupExpense.payer_share).where(
-            *group_window, GroupExpense.creditor_id == user_id)
+            *group_window, historical, GroupExpense.creditor_id == user_id)
         debtor = select(GroupExpense.category, GroupExpense.created_at, DebtSplit.amount).join(DebtSplit).where(
-            *group_window, DebtSplit.debtor_id == user_id)
-        for category, timestamp, amount in await sql.execute(payer.union_all(debtor)):
+            *group_window, historical, DebtSplit.debtor_id == user_id)
+        allocated = select(GroupExpense.category, GroupExpense.created_at, ExpenseParticipant.share_amount).join(
+            ExpenseParticipant).where(*group_window, ExpenseParticipant.user_id == user_id, ExpenseParticipant.share_amount > 0)
+        for category, timestamp, amount in await sql.execute(payer.union_all(debtor, allocated)):
             group += amount
             categories[category] += amount
             trend[bucket(timestamp.replace(tzinfo=timezone.utc).astimezone(LOCAL).date())] += amount
@@ -69,14 +73,15 @@ async def summarize(sql, user_id, period, scope, *, include_personal_categories=
         debtor = DebtSplit.debtor_id == user_id
         cutoff = now() - timedelta(days=3)
         overdue_debt = debtor & (DebtSplit.status == "UNPAID") & (GroupExpense.created_at < cutoff)
-        balances = await sql.execute(select(
-            func.sum(case((debtor, DebtSplit.amount), else_=0)),
-            func.sum(case((debtor, 0), else_=DebtSplit.amount)),
-            func.sum(case((overdue_debt, DebtSplit.amount), else_=0)),
-        ).select_from(DebtSplit).join(GroupExpense).where(
-            GroupExpense.group_id.in_(membership), DebtSplit.status.in_(["UNPAID", "PENDING"]),
-            debtor | (GroupExpense.creditor_id == user_id)))
-        owing, owed, overdue = (int(value or 0) for value in balances.one())
+        aged = dict((await sql.execute(select(GroupExpense.group_id, func.sum(DebtSplit.amount))
+                    .select_from(DebtSplit).join(GroupExpense).where(GroupExpense.group_id.in_(membership),
+                    overdue_debt).group_by(GroupExpense.group_id))).all())
+        for group_id in await sql.scalars(membership):
+            balances = await simplify_group(sql, group_id)
+            net = next(row["net_balance"] for row in balances["member_breakdown"] if row["user_id"] == user_id)
+            owing += max(-net, 0)
+            owed += max(net, 0)
+            overdue += min(max(-net, 0), int(aged.get(group_id, 0)))
 
     budgets = []
     monthly_limits = defaultdict(int)

@@ -2,7 +2,7 @@ from datetime import date
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, StringConstraints, field_validator
+from pydantic import AliasChoices, BaseModel, Field, StringConstraints, field_validator, model_validator
 
 from ..core.request_security import RECEIPT_LIMIT
 from .auth import Login
@@ -72,17 +72,68 @@ class BudgetIn(BaseModel):
         return value
 
 
-class GroupExpenseIn(BaseModel):
-    request_id: UUID
+WholeDong = Annotated[int, Field(ge=0, le=10**12)]
+
+
+class ParticipantIn(BaseModel):
+    user_id: int = Field(gt=0)
+    status: Literal["paid", "unpaid", "excluded"]
+    paid_amount: WholeDong
+    share_amount: WholeDong | None = None
+
+    @field_validator("user_id", "paid_amount", "share_amount", mode="before")
+    @classmethod
+    def reject_boolean(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("Expected a whole number")
+        return value
+
+    @model_validator(mode="after")
+    def validate_amounts(self):
+        if (self.status == "paid") != (self.paid_amount > 0):
+            raise ValueError("Only contributing members have a positive paid amount")
+        if self.status == "excluded" and self.share_amount not in (None, 0):
+            raise ValueError("Excluded members must have a zero share")
+        return self
+
+
+class GroupExpenseUpdate(BaseModel):
     title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
     category: Category
-    amount: Money
-    participants: Ids
+    amount: Money = Field(validation_alias=AliasChoices("amount", "total_amount"))
+    participants: Ids | Annotated[list[ParticipantIn], Field(min_length=1)] | None = None
     custom_shares: dict[int, Money] | None = Field(default=None, max_length=25)
+    payer_id: int | None = Field(default=None, gt=0)
+    split_user_ids: list[Annotated[int, Field(gt=0)]] | None = Field(default=None, max_length=25)
+
+
+class GroupExpenseIn(GroupExpenseUpdate):
+    request_id: UUID
+
+
+class DebtSelection(BaseModel):
+    debt_ids: Ids
+
+
+class ReminderTransfer(BaseModel):
+    debtor_id: int = Field(strict=True, gt=0)
+    amount: int = Field(strict=True, gt=0, le=2**63 - 1)
+
+
+class TransferIn(BaseModel):
+    creditor_id: int = Field(strict=True, gt=0)
+    amount: int = Field(strict=True, gt=0, le=2**63 - 1)
 
 
 class ReceiptIn(BaseModel):
-    debt_ids: Ids
+    debt_ids: Ids | None = None
+    transfer: TransferIn | None = None
+
+    @model_validator(mode="after")
+    def check_selection(self):
+        if (self.debt_ids is None) == (self.transfer is None):
+            raise ValueError("Choose debts or a simplified transfer")
+        return self
 
 
 GROUP_PROOF_MAX_BYTES = RECEIPT_LIMIT
