@@ -241,3 +241,27 @@ img, video, canvas, svg { max-width:100%; }
 .login-hero { padding:1.5rem; gap:2rem; }
 .login-hero h1 { font-size:2.5rem; line-height:1.15; }
 }
+
+.guide-trigger, .living-nav .drawer-guide {
+  min-height: max(44px, 2.75rem);
+  background: #143e35;
+  color: white;
+}
+.guide-trigger:hover { background: #235c4e; color: white; }
+.living-nav .drawer-guide { display: none; border: 1px solid currentColor; }
+.guide-auth { display: flex; justify-content: flex-end; padding: .75rem 1rem; }
+.guide-welcome { margin-bottom: 1rem; }
+.user-guide, .guide-examples { font-size: 1rem; overflow-wrap: anywhere; }
+.user-guide summary, .guide-examples summary {
+  min-height: max(44px, 2.75rem);
+  padding-block: .5rem;
+  font-weight: 700;
+}
+.user-guide ol { list-style: decimal; padding-inline-start: 1.5rem; margin-block: .5rem 1rem; }
+.user-guide li + li { margin-block-start: .6rem; }
+.user-guide code { display: block; padding: .5rem; background: #e8f1ed; border-radius: .4rem; white-space: pre-wrap; }
+.guide-examples .living-buttons { margin-block-start: .75rem; }
+.user-guide button, .guide-examples button { min-height: max(44px, 2.75rem); font-size: 1rem; }
+@media (max-width: 48rem) {
+  .living-nav .drawer-guide { display: flex; }
+}

@@ -14,7 +14,7 @@ export default function GroupChatPage({ group, userId, revision, reload }: {
   const [proof, setProof] = useState<{ id: number; creditor: boolean }>();
   const action = useAction();
   const composer = useRef<HTMLTextAreaElement>(null);
-  const hint = "/chi 240k tiền lẩu, An trả, Bình không ăn";
+  const examples = ["/chi 180k tiền cơm trưa, tôi trả", "/chi 300k tiền siêu thị, An trả, Bình không tham gia"];
   const [completed, setCompleted] = useState<Partial<Record<string, "confirmed" | "cancelled">>>({});
   function finish(id: string, cancel: boolean) {
     void action.run(async () => {
@@ -77,12 +77,16 @@ export default function GroupChatPage({ group, userId, revision, reload }: {
         </> : <p>Định dạng tin nhắn chưa được hỗ trợ.</p>}
       </article>)}
     </div>
-    <form className="living-card form" onSubmit={send}><button className="secondary" type="button" onClick={() => {
-      if (composer.current) {
-        composer.current.value = hint;
-        composer.current.focus();
-      }
-    }}>Mẫu: {hint}</button><label>Tin nhắn<textarea ref={composer} name="message" required maxLength={2000} /></label>
+    <form className="living-card form" onSubmit={send}><details className="living-card guide-examples">
+      <summary>Cách gõ lệnh /chi nhanh</summary>
+      <p>Chọn mẫu để điền vào ô nhập. Sửa số tiền và tên trước khi gửi, rồi kiểm tra thẻ xem trước.</p>
+      <div className="living-buttons">{examples.map(example => <button key={example} className="secondary" type="button"
+        onClick={() => {
+          if (!composer.current) return;
+          composer.current.value = example;
+          composer.current.focus();
+        }}>Thử: {example}</button>)}</div>
+    </details><label>Tin nhắn<textarea ref={composer} name="message" required maxLength={2000} /></label>
       <button className="primary" disabled={action.busy}>Gửi tin nhắn</button></form>
     {proof && <ProofReview groupId={group.id} proofId={proof.id} creditor={proof.creditor} close={() => setProof(undefined)} reload={reload} />}
   </section>;
