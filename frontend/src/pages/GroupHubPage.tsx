@@ -1,22 +1,30 @@
-import type { FormEvent } from "react";
+﻿import { useState, type FormEvent } from "react";
+import { Copy, Settings, Users } from "lucide-react";
 import { api } from "../lib/api";
 import { type Bank, type Group, type Member, useAction, useResource } from "../lib/living";
+import GroupExpenses from "../components/GroupExpenses";
+import SmartDebtsAndQrPage from "./SmartDebtsAndQrPage";
 
 export default function GroupHubPage({ groups, active, select, revision, reload, userId }: {
   groups: Group[]; active: Group | undefined; select: (groupId: number) => void;
   revision: number; reload: () => void; userId: number;
 }) {
+  const [setup, setSetup] = useState(!active);
+  const [notice, setNotice] = useState("");
   const action = useAction(reload);
   const directory = useResource<Member[]>(active ? `/groups/${active.id}/members` : null, revision);
-  const bank = useResource<Bank | null>("/users/me/bank-info", revision);
-  const currentBank = directory.data?.find(member => member.id === userId)?.qr ?? bank.data;
+  const bank = useResource<Bank | null>(setup ? "/users/me/bank-info" : null, revision);
+  const members = directory.data ?? [];
+  const currentBank = members.find(member => member.id === userId)?.qr ?? bank.data;
   function groupForm(event: FormEvent<HTMLFormElement>, join: boolean) {
     event.preventDefault();
     const form = event.currentTarget;
-    const value = String(new FormData(form).get("group"));
+    const value = String(new FormData(form).get("group")).trim();
     void action.run(async () => {
       const { data } = await api.post<Group>(join ? "/groups/join" : "/groups", join ? { group_code: value } : { name: value });
       if (data.status === "APPROVED") select(data.id);
+      setNotice(data.status === "PENDING" ? "Đã gửi yêu cầu. Vui lòng chờ chủ nhóm duyệt." :
+        data.status === "REJECTED" ? "Chủ nhóm đã từ chối yêu cầu tham gia." : "Đã chọn nhóm.");
       form.reset();
     });
   }
@@ -26,52 +34,49 @@ export default function GroupHubPage({ groups, active, select, revision, reload,
     void action.run(async () => {
       await api.put("/users/me/bank-info", values);
       if (active) await api.put(`/groups/${active.id}/members/me/qr`, values);
+      setNotice("Đã lưu thông tin VietQR.");
     });
   }
   return <section className="living-stack">
-    <h1>Groups</h1>
-    {action.error && <p className="error" role="alert">{action.error}</p>}
-    <div className="living-grid">
-      <form className="living-card form" onSubmit={event => groupForm(event, false)}>
-        <h2>Create a group</h2><label>Group name<input name="group" maxLength={100} required /></label>
-        <button className="primary" disabled={action.busy}>Create group</button>
-      </form>
-      <form className="living-card form" onSubmit={event => groupForm(event, true)}>
-        <h2>Request to join</h2><label>Invite code<input name="group" placeholder="GRP-DEMO01" maxLength={16} required /></label>
-        <button className="primary" disabled={action.busy}>Send request</button>
-      </form>
+    <div className="living-heading"><h1>{active?.name ?? "Nhóm của bạn"}</h1>
+      {active?.code && <button className="secondary" onClick={async () => {
+        try { await navigator.clipboard.writeText(active.code!); setNotice("Đã sao chép mã mời."); }
+        catch { setNotice(`Hãy sao chép mã mời: ${active.code}`); }
+      }}><Copy size={16}/> Mã mời · {active.code}</button>}
     </div>
-    <div className="living-card">
-      <h2>Your groups</h2>
-      {groups.length === 0 && <p>Create a group or enter an invite code to get started.</p>}
-      {groups.map(group => <div className="living-row" key={group.id}>
-        <span>{group.name} · {group.status === "APPROVED" ? group.role.toLowerCase() : group.status.toLowerCase()}</span>
-        {group.status === "APPROVED" && <div className="living-buttons">
-          <button className="secondary" onClick={() => select(group.id)}>{active?.id === group.id ? "Selected" : "Select"}</button>
-          {group.code && <button className="secondary" onClick={() => void action.run(() =>
-            navigator.clipboard.writeText(group.code ?? ""))}>Copy {group.code}</button>}
-        </div>}
-      </div>)}
-      {directory.error && <p className="error" role="alert">{directory.error}</p>}
-      {active?.role === "OWNER" && directory.data?.filter(member => member.status === "PENDING").map(member =>
-        <div className="living-row" key={member.id}>
-          <span>{member.name} requested to join {active.name}</span>
-          <div className="living-buttons">{(["APPROVED", "REJECTED"] as const).map(status =>
-            <button key={status} className="secondary" disabled={action.busy} onClick={() => void action.run(() =>
-              api.patch(`/groups/${active.id}/members/${member.id}`, { status }))}>
-              {status === "APPROVED" ? "Approve" : "Reject"}
-            </button>)}</div>
-        </div>)}
-    </div>
-    {bank.error && <p className="error" role="alert">{bank.error}</p>}
-    {!bank.loading && !directory.loading && <form className="living-card form" onSubmit={saveBank}
-      key={`${active?.id}:${currentBank?.bank_bin}:${currentBank?.bank_account_no}`}>
-      <h2>Bank and VietQR</h2>
-      {active && !active.qr_ready && <p role="status">Set up VietQR for {active.name} before logging or joining a split.</p>}
-      <label>Bank BIN<input name="bank_bin" required pattern="[0-9]{6}" inputMode="numeric" defaultValue={currentBank?.bank_bin} /></label>
-      <label>Account number<input name="bank_account_no" required pattern="[0-9]{4,32}" inputMode="numeric" defaultValue={currentBank?.bank_account_no} /></label>
-      <label>Account holder<input name="bank_account_name" required maxLength={100} defaultValue={currentBank?.bank_account_name} /></label>
-      <button className="primary" disabled={action.busy}>{active ? "Save to profile and selected group" : "Save to profile"}</button>
-    </form>}
+    {notice && <p className="app-notice" role="status">{notice}</p>}
+    {(action.error || directory.error) && <p className="error" role="alert">{action.error || directory.error}</p>}
+    {active && <>
+      <SmartDebtsAndQrPage group={active} members={members} userId={userId} revision={revision} reload={reload}/>
+      <GroupExpenses groupId={active.id} members={members} userId={userId} revision={revision} reload={reload}/>
+      <section className="living-card"><h2><Users size={18}/> Thành viên và yêu cầu tham gia</h2>
+        <div className="group-members">{members.filter(m => m.status === "APPROVED").map(m =>
+          <div key={m.id}><strong>{m.name}</strong><small>{m.qr ? "Đã có VietQR" : "Chưa có VietQR"}</small></div>)}</div>
+        {active.role === "OWNER" && members.filter(m => m.status === "PENDING").map(m =>
+          <div className="living-row" key={m.id}><span>{m.name} muốn tham gia nhóm</span>
+            <div className="living-buttons">{(["APPROVED", "REJECTED"] as const).map(status =>
+              <button key={status} className="secondary" disabled={action.busy} onClick={() => void action.run(() =>
+                api.patch(`/groups/${active.id}/members/${m.id}`, { status }))}>{status === "APPROVED" ? "Chấp nhận" : "Từ chối"}</button>)}</div>
+          </div>)}
+      </section>
+    </>}
+    <details className="living-card group-setup" open={setup} onToggle={e => setSetup(e.currentTarget.open)}>
+      <summary><Settings size={18}/> Quản lý &amp; Cài đặt nhóm</summary>
+      <div className="living-grid">
+        <form className="form" onSubmit={e => groupForm(e, false)}><h2>Tạo nhóm</h2><label>Tên nhóm<input name="group" maxLength={100} required/></label>
+          <button className="primary" disabled={action.busy}>Tạo nhóm</button></form>
+        <form className="form" onSubmit={e => groupForm(e, true)}><h2>Tham gia nhóm</h2><label>Mã mời<input name="group" maxLength={16} required/></label>
+          <button className="secondary" disabled={action.busy}>Gửi yêu cầu</button></form>
+      </div>
+      {groups.filter(g => g.status !== "APPROVED").map(g => <p key={g.id}>{g.name} · {g.status === "PENDING" ? "Chờ duyệt" : "Đã từ chối"}</p>)}
+      {bank.error && <p className="error" role="alert">{bank.error}</p>}
+      {setup && !bank.loading && !directory.loading && <form key={JSON.stringify(currentBank)} className="form" onSubmit={saveBank}>
+        <h2>Ngân hàng và VietQR của bạn</h2>
+        <label>Mã BIN ngân hàng<input name="bank_bin" required pattern="[0-9]{6}" inputMode="numeric" defaultValue={currentBank?.bank_bin}/></label>
+        <label>Số tài khoản<input name="bank_account_no" required pattern="[0-9]{4,32}" inputMode="numeric" defaultValue={currentBank?.bank_account_no}/></label>
+        <label>Chủ tài khoản<input name="bank_account_name" required maxLength={100} defaultValue={currentBank?.bank_account_name}/></label>
+        <button className="primary" disabled={action.busy}>{active ? "Lưu vào hồ sơ và nhóm này" : "Lưu vào hồ sơ"}</button>
+      </form>}
+    </details>
   </section>;
 }

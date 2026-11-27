@@ -11,6 +11,7 @@ export type Debt = { id: number; title: string; amount: number; status: "UNPAID"
   debtor_id: number; creditor_id: number; proof_id: number | null; overdue: boolean };
 export type ChatItem = { id: string; created_at: string; sender_id: number } & (
   { kind: "TEXT"; sender_name: string; text: string } |
+  { kind: "DEBT_REMINDER"; sender_name: string; debtor_ids: number[] } |
   { kind: "PAYMENT_PROOF"; proof_id: number; creditor_id: number; status: string }
 );
 export type Budget = { category: Category; monthly_limit: number; spent: number };
@@ -31,9 +32,9 @@ export function localDate(date = new Date()) {
 }
 
 const eventNotices: ReadonlyMap<string, string> = new Map([
-  ["group_join_requested", "New group join request"], ["group_membership_updated", "Group membership updated"],
-  ["group_debt_reminder", "You received a debt reminder"], ["group_proof_submitted", "A receipt is ready for review"],
-  ["PROOF_VERIFIED", "Your payment proof was reviewed"],
+  ["group_join_requested", "Có yêu cầu tham gia nhóm mới"], ["group_membership_updated", "Đã cập nhật thành viên nhóm"],
+  ["group_debt_reminder", "Bạn nhận được lời nhắc thanh toán"], ["group_proof_submitted", "Có biên lai mới chờ duyệt"],
+  ["PROOF_VERIFIED", "Chủ nợ đã xử lý biên lai của bạn"],
 ]);
 export function realtimeUpdate(event: unknown) {
   if (typeof event !== "object" || event === null || !("type" in event) || typeof event.type !== "string") return;

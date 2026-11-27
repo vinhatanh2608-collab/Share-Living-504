@@ -68,6 +68,7 @@ class GroupProof(Base):
     object_key: Mapped[str] = mapped_column(String(255))
     debt_ids: Mapped[list[int]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(10), default="PENDING")
+    note: Mapped[str | None] = mapped_column(String(300))
     reject_reason: Mapped[str | None] = mapped_column(String(300))
     created_at: Mapped[datetime] = mapped_column(default=now)
 
@@ -82,6 +83,18 @@ class DebtSplit(Base):
     status: Mapped[str] = mapped_column(String(10), default="UNPAID")
     proof_id: Mapped[int | None] = mapped_column(ForeignKey("group_payment_proofs.id"))
     reminded_at: Mapped[datetime | None]
+
+
+class GroupReminder(Base):
+    __tablename__ = "group_reminders"
+    __table_args__ = {"sqlite_autoincrement": True}
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("living_groups.id"))
+    sender_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    sender_name: Mapped[str] = mapped_column(String(200))
+    debtor_ids: Mapped[list[int]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(default=now)
+    next_attempt: Mapped[datetime] = mapped_column(default=now, index=True)
 
 
 class GroupEvent(Base):

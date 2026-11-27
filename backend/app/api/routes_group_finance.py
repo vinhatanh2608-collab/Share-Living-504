@@ -2,11 +2,11 @@ from datetime import timedelta
 from hashlib import sha256
 
 from fastapi import APIRouter, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 
 from .deps import Actor
 from .routes_living import approved_member, qr
-from ..models.living import DebtSplit, GroupEvent, GroupExpense, GroupMember, GroupProof, LivingGroup
+from ..models.living import DebtSplit, GroupEvent, GroupExpense, GroupMember, GroupProof, GroupReminder, LivingGroup
 from ..models.mysql_models import now
 from ..schemas.living import GROUP_PROOF_MAX_BYTES, GroupExpenseIn, ReceiptIn, ReceiptSubmit, ReceiptUpload, VerifyIn
 from ..services.storage_service import PROOF_IMAGE_TYPES, download, finalize, upload_ticket
@@ -68,9 +68,18 @@ async def expenses(group_id: int, request: Request, actor: Actor, before: int | 
         query = select(GroupExpense).where(GroupExpense.group_id == group_id)
         if before is not None:
             query = query.where(GroupExpense.id < before)
-        rows = await sql.scalars(query.order_by(GroupExpense.id.desc()).limit(100))
-        return [{key: getattr(row, key) for key in ("id", "creditor_id", "title", "category", "amount", "created_at")}
-                for row in rows]
+        rows = (await sql.scalars(query.order_by(GroupExpense.id.desc()).limit(100))).all()
+        if not rows:
+            return []
+        shares = {row.id: ([{"user_id": row.creditor_id, "amount": row.payer_share}]
+                           if row.payer_share else []) for row in rows}
+        splits = await sql.scalars(select(DebtSplit).where(
+            DebtSplit.expense_id.in_(shares.keys())).order_by(DebtSplit.debtor_id))
+        for split in splits:
+            shares[split.expense_id].append({"user_id": split.debtor_id, "amount": split.amount})
+        return [{**{key: getattr(row, key) for key in
+                    ("id", "creditor_id", "title", "category", "amount", "created_at")},
+                 "shares": shares[row.id]} for row in rows]
 
 
 def debt_query(group_id):
@@ -89,6 +98,21 @@ async def debts(group_id: int, request: Request, actor: Actor, before: int | Non
         return [{"id": debt.id, "title": expense.title, "amount": debt.amount, "status": debt.status,
                  "debtor_id": debt.debtor_id, "creditor_id": expense.creditor_id, "proof_id": debt.proof_id,
                  "overdue": debt.status == "UNPAID" and expense.created_at < cutoff} for debt, expense in rows]
+
+
+@router.get("/debts/summary")
+async def debt_summary(group_id: int, request: Request, actor: Actor):
+    async with request.app.state.resources.sql() as sql:
+        await approved_member(sql, group_id, actor.id)
+        debtor = DebtSplit.debtor_id == actor.id
+        creditor = GroupExpense.creditor_id == actor.id
+        owed, receivable = (await sql.execute(select(
+            func.sum(case((debtor, DebtSplit.amount), else_=0)),
+            func.sum(case((creditor, DebtSplit.amount), else_=0)),
+        ).select_from(DebtSplit).join(GroupExpense).where(
+            GroupExpense.group_id == group_id, DebtSplit.status != "PAID", debtor | creditor
+        ))).one()
+        return {"owed": int(owed or 0), "receivable": int(receivable or 0)}
 
 
 async def payable(sql, group_id, actor_id, ids, lock=False):
@@ -114,7 +138,7 @@ async def payment_qr(group_id: int, data: ReceiptIn, request: Request, actor: Ac
             raise HTTPException(409, "The creditor has not configured VietQR")
         total = sum(debt.amount for debt, _ in rows)
         reference = f"G{group_id}-{rows[0][0].id}"
-        return {"amount": total, "qr_url": image_url(creditor.bank_bin, creditor.bank_account_no,
+        return {"amount": total, "transfer_description": reference, "bank": qr(creditor), "qr_url": image_url(creditor.bank_bin, creditor.bank_account_no,
                     creditor.bank_account_name, total, reference)}
 
 
@@ -137,6 +161,9 @@ async def remind(group_id: int, data: ReceiptIn, request: Request, actor: Actor)
                     and (debt.reminded_at is None or debt.reminded_at < cutoff)):
                 debt.reminded_at = now()
                 recipients.add(debt.debtor_id)
+        if recipients:
+            sql.add(GroupReminder(group_id=group_id, sender_id=actor.id, sender_name=actor.name,
+                                  debtor_ids=sorted(recipients)))
     if recipients:
         request.app.state.ws.publish({"type": "group_debt_reminder", "group_id": group_id, "group_name": group_name}, recipients)
     return {"notified": len(recipients)}
@@ -157,15 +184,15 @@ async def submit_receipt(group_id: int, data: ReceiptSubmit, request: Request, a
         existing = await sql.scalar(select(GroupProof).where(GroupProof.upload_id == str(data.upload_id),
             GroupProof.group_id == group_id, GroupProof.debtor_id == actor.id).with_for_update())
         if existing:
-            if sorted(data.debt_ids) != existing.debt_ids:
-                raise HTTPException(409, "Upload already submitted with different debts")
+            if sorted(data.debt_ids) != existing.debt_ids or (data.note or None) != existing.note:
+                raise HTTPException(409, "Upload already submitted with different details")
             return {"id": existing.id, "status": existing.status}
         rows, creditor_id = await payable(sql, group_id, actor.id, data.debt_ids, lock=True)
         await approved_member(sql, group_id, creditor_id, lock=True)
         key = await finalize(actor.id, f"group-receipts/{group_id}", data.upload_id,
                              PROOF_IMAGE_TYPES, GROUP_PROOF_MAX_BYTES)
         proof = GroupProof(group_id=group_id, debtor_id=actor.id, creditor_id=creditor_id,
-                           upload_id=str(data.upload_id), object_key=key, debt_ids=sorted(data.debt_ids))
+                           note=data.note or None, upload_id=str(data.upload_id), object_key=key, debt_ids=sorted(data.debt_ids))
         sql.add(proof)
         await sql.flush()
         for debt, _ in rows:
@@ -188,7 +215,7 @@ async def authorized_proof(sql, group_id, proof_id, actor_id, *, review=False):
 async def get_receipt(group_id: int, proof_id: int, request: Request, actor: Actor):
     async with request.app.state.resources.sql() as sql:
         proof = await authorized_proof(sql, group_id, proof_id, actor.id)
-        return {"url": await download(proof.object_key, namespace=f"group-receipts/{group_id}", user_id=proof.debtor_id), "status": proof.status, "reject_reason": proof.reject_reason}
+        return {"url": await download(proof.object_key, namespace=f"group-receipts/{group_id}", user_id=proof.debtor_id), "status": proof.status, "reject_reason": proof.reject_reason, "note": proof.note}
 
 
 @router.patch("/proofs/{proof_id}/verify")

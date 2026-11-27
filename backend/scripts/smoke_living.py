@@ -120,7 +120,8 @@ async def main():
         request("PATCH", f"{receipt}/verify", owner, {"decision": "APPROVE"})
         assert (await wait_event(member_ws, "PROOF_VERIFIED"))["status"] == "PAID"
         assert request("GET", f"{path}/debts", member)[0]["status"] == "PAID"
-        assert request("GET", f"{path}/chat", owner)[0]["status"] == "PAID"
+        assert any(item.get("proof_id") == proof["id"] and item.get("status") == "PAID"
+                   for item in request("GET", f"{path}/chat", owner))
     today = today_local()
     request("POST", "/personal-expenses", member, {"type": "EXPENSE", "category": "FOOD",
             "amount": 100_000, "spent_at": today.isoformat()})

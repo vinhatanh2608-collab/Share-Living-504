@@ -185,3 +185,17 @@
   .living-nav nav { display: flex; flex-wrap: wrap; }
   .living-account { display: flex; align-items: center; justify-content: space-between; }
 }
+.group-members { display:flex; flex-wrap:wrap; gap:.6rem; }
+.group-balances { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.75rem; }
+.group-balances h3 { margin:.4rem 0 0; font-size:clamp(1rem,2.2vw,1.65rem); overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
+.group-balances > :last-child { background:#173e36; color:white; }
+.group-debt-columns { align-items:start; }
+.group-debt-columns h3 { margin:.25rem 0; }
+.group-debt-columns .living-buttons { flex-wrap:wrap; }
+.group-expenses details { padding:.7rem 0; border-top:1px solid var(--living-line); }
+.group-expenses summary { cursor:pointer; }
+@media (max-width:520px) { .group-balances { grid-template-columns:1fr; } }
+.group-members > div { display:grid; gap:.2rem; border:1px solid var(--living-line); border-radius:.6rem; padding:.5rem .8rem; }
+.group-setup summary { cursor:pointer; font-weight:700; }
+.group-setup svg, .living-card h2 svg { vertical-align:middle; }
+.group-setup[open] > .living-grid, .group-setup > .form { margin-top:1rem; }

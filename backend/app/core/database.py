@@ -12,6 +12,8 @@ from ..models.living import PERFORMANCE_INDEXES
 def initialize_mysql_schema(connection):
     Base.metadata.create_all(connection)
     inspector = inspect(connection)
+    if "note" not in {column["name"] for column in inspector.get_columns("group_payment_proofs")}:
+        connection.execute(text("ALTER TABLE group_payment_proofs ADD COLUMN note VARCHAR(300) NULL"))
     # create_all skips indexes on tables that already exist.
     for index in PERFORMANCE_INDEXES:
         existing = inspector.get_indexes(index.table.name)

@@ -40,6 +40,7 @@ api.interceptors.response.use(r => r, error => {
   return Promise.reject(error);
 });
 function serviceError(status?: number, retryAfter?: unknown) {
+  if (status === 403) return "Bạn không có quyền thực hiện thao tác này.";
   if (status === 413) return "Tệp tải lên quá lớn. Hãy chọn ảnh nhỏ hơn hoặc nén ảnh rồi thử lại.";
   if (status === 429) {
     let seconds = 0;
@@ -60,6 +61,20 @@ export function explain(error: unknown) {
     const message = serviceError(error.response?.status, retryAfter);
     if (message) return message;
     const detail: unknown = error.response?.data?.detail;
+    const path = error.config?.url ?? "";
+    if (path.startsWith("/groups") || path === "/users/me/bank-info") {
+      if (detail === "Group code not found") return "Không tìm thấy nhóm có mã mời này.";
+      if (detail === "The creditor has not configured VietQR") return "Chủ nợ chưa thiết lập VietQR. Bạn vẫn có thể nộp ảnh xác minh.";
+      if (detail === "Invalid receipt image") return "Ảnh biên lai không hợp lệ. Hãy chọn ảnh JPEG, PNG hoặc WebP khác.";
+      switch (error.response?.status) {
+        case 401: return "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.";
+        case 404: return "Không tìm thấy mục này hoặc bạn không còn quyền truy cập nhóm.";
+        case 409: return "Dữ liệu đã thay đổi. Hãy tải lại thông tin nhóm rồi thử lại.";
+        case 400:
+        case 422: return "Thông tin chưa hợp lệ. Vui lòng kiểm tra lại dữ liệu đã nhập.";
+        default: return "Không thể hoàn tất yêu cầu. Hãy kiểm tra kết nối và thử lại.";
+      }
+    }
     if (typeof detail === "string") return detail;
     if (error.response?.status === 422) return "Check the form values and try again.";
     if (!error.response) return "Could not reach the API. Check the connection and server URL.";

@@ -95,6 +95,7 @@ class ReceiptUpload(ReceiptIn):
 
 
 class ReceiptSubmit(ReceiptIn):
+    note: Annotated[str, StringConstraints(strip_whitespace=True, max_length=300)] | None = None
     upload_id: UUID
 
 

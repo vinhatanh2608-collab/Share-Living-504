@@ -10,7 +10,7 @@ export default function Modal({ title, children, close, busy = false }:
     return () => d?.close();
   }, []);
   return <dialog ref={ref} className="modal" aria-label={title} onCancel={e => { e.preventDefault(); if (!busy) close(); }}>
-    <div className="modal-head"><h2>{title}</h2><button className="icon" aria-label="Close" onClick={close} disabled={busy}><X size={20}/></button></div>
+    <div className="modal-head"><h2>{title}</h2><button className="icon" aria-label="Đóng" onClick={close} disabled={busy}><X size={20}/></button></div>
     {children}
   </dialog>;
 }

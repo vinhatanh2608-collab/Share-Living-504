@@ -14,8 +14,8 @@ import type { User } from "./types/api";
 const OverviewAnalyticsPage = lazy(() => import("./pages/OverviewAnalyticsPage"));
 
 const pages = [
-  ["overview", "Overview", BarChart3], ["groups", "Groups", Users], ["debts", "Debts & VietQR", Landmark],
-  ["chat", "Group chat", MessageCircle], ["advisor", "Advisor", Sparkles],
+  ["overview", "Tổng quan", BarChart3], ["groups", "Nhóm", Users], ["debts", "Công nợ & VietQR", Landmark],
+  ["chat", "Trò chuyện nhóm", MessageCircle], ["advisor", "Trợ lý", Sparkles],
 ] as const;
 type Page = typeof pages[number][0];
 
@@ -51,21 +51,21 @@ function Workspace({ user, token }: { user: User; token: string }) {
       <div className="living-brand"><Building2 size={23} /><strong>Shared Living</strong></div>
       <nav aria-label="Workspace">{pages.map(([id, label, Icon]) => <button key={id}
         aria-current={page === id ? "page" : undefined} onClick={() => setPage(id)}><Icon size={19} />{label}</button>)}</nav>
-      <div className="living-account"><strong>{user.name}</strong><button onClick={logout}><LogOut size={16} /> Sign out</button></div>
+      <div className="living-account"><strong>{user.name}</strong><button onClick={logout}><LogOut size={16} /> Đăng xuất</button></div>
     </aside>
     <main className="living-main">
       <header className="living-toolbar">
-        <label>Active group <select value={active?.id ?? ""} disabled={!available.length}
+        <label>Nhóm đang chọn <select value={active?.id ?? ""} disabled={!available.length}
           onChange={event => setGroupId(Number(event.target.value))}>
-          {!available.length && <option value="">No approved group</option>}
+          {!available.length && <option value="">Chưa có nhóm được duyệt</option>}
           {available.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}
         </select></label>
         <button className="secondary" disabled={alerts || action.busy} onClick={() => void action.run(async () => {
-          const allowed = await enableAlerts(); setAlerts(allowed); setNotice(allowed ? "Desktop alerts enabled." : "Alerts were declined.");
-        })}><Bell size={17} />{alerts ? "Alerts enabled" : "Enable alerts"}</button>
+          const allowed = await enableAlerts(); setAlerts(allowed); setNotice(allowed ? "Đã bật thông báo." : "Chưa được cấp quyền thông báo.");
+        })}><Bell size={17} />{alerts ? "Đã bật thông báo" : "Bật thông báo"}</button>
       </header>
       {status !== "online" && <p className="app-notice" role="status">{realtimeError || "Đang kết nối lại để nhận cập nhật trực tiếp. Dữ liệu hiển thị có thể chưa mới nhất."}</p>}
-      {notice && <div className="app-notice" role="status">{notice}<button className="secondary" onClick={() => setNotice("")}>Dismiss</button></div>}
+      {notice && <div className="app-notice" role="status">{notice}<button className="secondary" onClick={() => setNotice("")}>Đóng</button></div>}
       {(groups.error || action.error) && <p className="error" role="alert">{groups.error || action.error}</p>}
       {page === "overview" && <Suspense fallback={<p role="status">Loading the overview…</p>}>
         <OverviewAnalyticsPage key={active?.id} group={active} revision={revision} reload={reload}

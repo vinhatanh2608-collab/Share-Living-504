@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import test_api  # Initialize development settings from .env.example.
 from app.api.routes_advisor import today_local
-from app.api.routes_group_chat import project_one
+from app.api.routes_group_chat import project_one, project_reminder
 from app.core.security import passwords
 from app.main import create_app
 from app.models.mysql_models import Base
@@ -136,13 +136,25 @@ def test_group_workflow_scopes_qr_chat_and_receipts_to_members(client):
         expense = client.post(f"{path}/expenses", headers=owner, json=body)
         assert expense.status_code == 201, expense.text
         assert client.post(f"{path}/expenses", headers=owner, json=body).json() == expense.json()
+        ledger = client.get(f"{path}/expenses", headers=member).json()
+        assert ledger[0]["creditor_id"] == owner_id
+        assert {s["user_id"]: s["amount"] for s in ledger[0]["shares"]} == {owner_id: 41, member_id: 60}
         assert client.get(f"{path}/debts", headers=outsider).status_code == 404
         debts = client.get(f"{path}/debts", headers=member).json()
         assert len(debts) == 1 and debts[0]["amount"] == 60 and debts[0]["creditor_id"] == owner_id
         ids = {"debt_ids": [debts[0]["id"]]}
+        assert client.get(f"{path}/debts/summary", headers=outsider).status_code == 404
+        assert client.get(f"{path}/debts/summary", headers=member).json() == {"owed": 60, "receivable": 0}
+        assert client.get(f"{path}/debts/summary", headers=owner).json() == {"owed": 0, "receivable": 60}
         qr = client.post(f"{path}/debts/qr", headers=member, json=ids).json()
+        assert qr["bank"] == bank and qr["transfer_description"] in qr["qr_url"]
         assert qr["amount"] == 60 and "amount=60" in qr["qr_url"]
         assert client.post(f"{path}/debts/remind", headers=owner, json=ids).json() == {"notified": 1}
+        assert client.post(f"{path}/debts/remind", headers=owner, json=ids).json() == {"notified": 0}
+        assert client.portal.call(project_reminder, client.app.state.resources, client.app.state.ws)
+        reminder = socket.receive_json()["message"]
+        assert reminder["kind"] == "DEBT_REMINDER" and reminder["debtor_ids"] == [member_id]
+        assert not client.portal.call(project_reminder, client.app.state.resources, client.app.state.ws)
         assert client.post(f"{path}/chat", headers=member, json={"text": "Hello"}).status_code == 201
         assert socket.receive_json()["type"] == "group_chat"
         upload_id = str(uuid4())
@@ -152,9 +164,11 @@ def test_group_workflow_scopes_qr_chat_and_receipts_to_members(client):
             upload = client.post(f"{path}/proofs/upload", headers=member, json={**ids, "size": 100, "content_type": "image/jpeg"})
             assert upload.json() == ticket
         with patch("app.api.routes_group_finance.finalize", AsyncMock(return_value="objects/test")) as finalize:
-            result = client.post(f"{path}/proofs", headers=member, json={**ids, "upload_id": upload_id})
+            submission = {**ids, "upload_id": upload_id, "note": "  Rent split  "}
+            assert client.post(f"{path}/proofs", headers=member, json={**submission, "note": "x" * 301}).status_code == 422
+            result = client.post(f"{path}/proofs", headers=member, json=submission)
             assert result.status_code == 201, result.text
-            assert client.post(f"{path}/proofs", headers=member, json={**ids, "upload_id": upload_id}).json() == result.json()
+            assert client.post(f"{path}/proofs", headers=member, json=submission).json() == result.json()
             assert finalize.await_count == 1
         proof_id = result.json()["id"]
         assert client.portal.call(project_one, client.app.state.resources, client.app.state.ws)
@@ -165,14 +179,16 @@ def test_group_workflow_scopes_qr_chat_and_receipts_to_members(client):
         wrong_group_receipt = f"{root}/{other_group['id']}/proofs/{proof_id}"
         assert client.get(wrong_group_receipt, headers=outsider).status_code == 404
         with patch("app.api.routes_group_finance.download", AsyncMock(return_value=ticket["url"])):
-            assert client.get(receipt, headers=owner).json()["url"] == ticket["url"]
+            details = client.get(receipt, headers=owner).json()
+            assert details["url"] == ticket["url"] and details["note"] == "Rent split"
         assert client.patch(f"{receipt}/verify", headers=member, json={"decision": "APPROVE"}).status_code == 403
         assert client.patch(f"{receipt}/verify", headers=owner, json={"decision": "APPROVE"}).json() == {"status": "PAID"}
         assert client.portal.call(project_one, client.app.state.resources, client.app.state.ws)
         assert socket.receive_json()["message"]["status"] == "PAID"
         assert client.get(f"{path}/debts", headers=member).json()[0]["status"] == "PAID"
+        assert client.get(f"{path}/debts/summary", headers=member).json()["owed"] == 0
         chat = client.get(f"{path}/chat", headers=member).json()
-        assert {item["kind"] for item in chat} == {"TEXT", "PAYMENT_PROOF"}
+        assert {item["kind"] for item in chat} == {"TEXT", "PAYMENT_PROOF", "DEBT_REMINDER"}
 
     repeat = {**body, "request_id": str(uuid4())}
     assert client.post(f"{path}/expenses", headers=owner, json=repeat).status_code == 201
@@ -401,10 +417,12 @@ def test_performance_indexes_are_added_to_existing_tables():
     try:
         with engine.begin() as connection:
             Base.metadata.create_all(connection)
+            connection.exec_driver_sql("ALTER TABLE group_payment_proofs DROP COLUMN note")
             for index in PERFORMANCE_INDEXES:
                 index.drop(connection)
             initialize_mysql_schema(connection)
             initialize_mysql_schema(connection)
+            assert "note" in {col["name"] for col in inspect(connection).get_columns("group_payment_proofs")}
             for index in PERFORMANCE_INDEXES:
                 existing = {item["name"]: item["column_names"]
                             for item in inspect(connection).get_indexes(index.table.name)}

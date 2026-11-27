@@ -11,7 +11,7 @@ import logging
 from .deps import Actor
 from .routes_living import approved_member
 from ..core.mongo_filters import lookup_id
-from ..models.living import GroupEvent, GroupMember, GroupProof
+from ..models.living import GroupEvent, GroupMember, GroupProof, GroupReminder
 from ..models.mysql_models import now
 from ..schemas.living import ChatIn
 
@@ -88,10 +88,32 @@ async def project_one(resources, manager):
     return True
 
 
+async def project_reminder(resources, manager):
+    async with resources.sql.begin() as sql:
+        reminder = await sql.scalar(select(GroupReminder).where(GroupReminder.next_attempt <= now())
+            .order_by(GroupReminder.next_attempt, GroupReminder.id).limit(1).with_for_update())
+        if not reminder:
+            return False
+        row = {"_id": f"reminder:{reminder.id}", "group_id": reminder.group_id, "kind": "DEBT_REMINDER",
+               "sender_id": reminder.sender_id, "sender_name": reminder.sender_name,
+               "debtor_ids": reminder.debtor_ids, "created_at": reminder.created_at}
+        try:
+            await resources.mongo.group_messages.replace_one({"_id": row["_id"]}, row, upsert=True)
+        except PyMongoError:
+            logger.warning("Group reminder projection delayed", exc_info=True)
+            reminder.next_attempt = now() + timedelta(seconds=10)
+            return True
+        recipients = await audience(sql, reminder.group_id)
+        await sql.delete(reminder)
+    manager.publish({"type": "group_chat", "group_id": row["group_id"], "message": view(row)}, recipients)
+    return True
+
+
 async def project_forever(resources, manager):
     while True:
         try:
-            if not await project_one(resources, manager):
+            reminded = await project_reminder(resources, manager)
+            if not await project_one(resources, manager) and not reminded:
                 await asyncio.sleep(1)
         except SQLAlchemyError:
             logger.warning("Group outbox unavailable", exc_info=True)
