@@ -1,7 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { BarChart3, Bell, Building2, Landmark, LogOut, MessageCircle, Sparkles, Users } from "lucide-react";
+import { Menu, X, BarChart3, Bell, Building2, Landmark, LogOut, MessageCircle, Sparkles, Users } from "lucide-react";
 import { type Group, realtimeUpdate, useAction, useResource } from "./lib/living";
 import { enableAlerts, notify } from "./lib/notify";
+import GroupBudgetInsights from "./components/GroupBudgetInsights";
 import AiAdvisorPage from "./pages/AiAdvisorPage";
 import GroupChatPage from "./pages/GroupChatPage";
 import GroupHubPage from "./pages/GroupHubPage";
@@ -21,6 +22,7 @@ type Page = typeof pages[number][0];
 
 function Workspace({ user, token }: { user: User; token: string }) {
   const logout = useAuthStore(state => state.logout);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [page, setPage] = useState<Page>("overview");
   const [groupId, setGroupId] = useState<number>();
   const [revision, setRevision] = useState(0);
@@ -46,11 +48,20 @@ function Workspace({ user, token }: { user: User; token: string }) {
     const poll = window.setInterval(reload, 60_000);
     return () => { stop(); window.clearTimeout(expiry); window.clearInterval(poll); };
   }, [token, user, logout, reload]);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setMenuOpen(false); };
+    document.addEventListener("keydown", escape);
+    return () => document.removeEventListener("keydown", escape);
+  }, [menuOpen]);
   return <div className="living-shell">
-    <aside className="living-nav">
+    <div className="mobile-bar"><strong>Shared Living</strong><button className="secondary" aria-expanded={menuOpen} aria-controls="workspace-navigation" onClick={() => setMenuOpen(!menuOpen)}><Menu aria-hidden="true" size={22}/> Menu nh?m</button></div>
+    {menuOpen && <button className="nav-backdrop" aria-label="??ng menu" onClick={() => setMenuOpen(false)}/> }
+    <aside id="workspace-navigation" className={`living-nav${menuOpen ? " is-open" : ""}`}>
+      <button className="mobile-close secondary" onClick={() => setMenuOpen(false)}><X aria-hidden="true" size={22}/> ??ng menu</button>
       <div className="living-brand"><Building2 size={23} /><strong>Shared Living</strong></div>
       <nav aria-label="Workspace">{pages.map(([id, label, Icon]) => <button key={id}
-        aria-current={page === id ? "page" : undefined} onClick={() => setPage(id)}><Icon size={19} />{label}</button>)}</nav>
+        aria-current={page === id ? "page" : undefined} onClick={() => { setPage(id); setMenuOpen(false); }}><Icon size={19} />{label}</button>)}</nav>
       <div className="living-account"><strong>{user.name}</strong><button onClick={logout}><LogOut size={16} /> Đăng xuất</button></div>
     </aside>
     <main className="living-main">
@@ -73,7 +84,10 @@ function Workspace({ user, token }: { user: User; token: string }) {
       </Suspense>}
       {page === "groups" && <GroupHubPage key={active?.id} active={active} groups={groups.data ?? []} userId={user.id}
         select={setGroupId} reload={reload} revision={revision} />}
-      {page === "advisor" && <AiAdvisorPage revision={revision} reload={reload} />}
+      {page === "advisor" && <div className="living-stack">
+        {active && <GroupBudgetInsights key={active.id} group={active} revision={revision} reload={reload} />}
+        <AiAdvisorPage revision={revision} reload={reload} />
+      </div>}
       {page === "debts" && active && <SmartDebtsAndQrPage key={active.id} group={active} userId={user.id} revision={revision} reload={reload} />}
       {page === "chat" && active && <GroupChatPage key={active.id} group={active} userId={user.id} revision={revision} reload={reload} />}
       {(page === "debts" || page === "chat") && !active && <div className="living-card">

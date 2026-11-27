@@ -5,6 +5,7 @@ from ..schemas.living import GroupExpenseUpdate, ParticipantIn
 
 def resolve_participants(data: GroupExpenseUpdate, actor_id: int, approved: set[int]):
     """Return one allocation per member, preserving integer-dong totals."""
+    funded_by_pool = getattr(data, "funded_by_pool", False)
     submitted = data.participants
     if submitted and isinstance(submitted[0], ParticipantIn):
         if any(value is not None for value in (data.payer_id, data.split_user_ids, data.custom_shares)):
@@ -27,16 +28,17 @@ def resolve_participants(data: GroupExpenseUpdate, actor_id: int, approved: set[
             raise HTTPException(422, "Choose unique members with a positive legacy share")
         if data.custom_shares is not None and set(data.custom_shares) != set(ids):
             raise HTTPException(422, "Custom shares must cover selected members")
-        entries = [ParticipantIn(user_id=uid, status="paid" if uid == payer else "unpaid",
-                                 paid_amount=data.amount if uid == payer else 0,
+        entries = [ParticipantIn(user_id=uid, status="paid" if uid == payer and not funded_by_pool else "unpaid",
+                                 paid_amount=data.amount if uid == payer and not funded_by_pool else 0,
                                  share_amount=(data.custom_shares or {}).get(uid)) for uid in ids]
-        if payer not in ids:
+        if payer not in ids and not funded_by_pool:
             entries.append(ParticipantIn(user_id=payer, status="paid", paid_amount=data.amount, share_amount=0))
 
     by_id = {entry.user_id: entry for entry in entries}
     if len(by_id) != len(entries) or not by_id.keys() <= approved:
         raise HTTPException(422, "Each participant must be a distinct approved group member")
-    if sum(entry.paid_amount for entry in entries) != data.amount:
+    expected = 0 if funded_by_pool else data.amount
+    if sum(entry.paid_amount for entry in entries) != expected:
         raise HTTPException(422, "Contributions must add up to the total")
     remaining = data.amount - sum(entry.share_amount or 0 for entry in entries)
     missing = sorted(entry.user_id for entry in entries if entry.status != "excluded" and entry.share_amount is None)

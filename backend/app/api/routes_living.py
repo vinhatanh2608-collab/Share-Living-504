@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from secrets import token_hex
 
 from fastapi import APIRouter, HTTPException, Request
@@ -7,13 +7,16 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from .deps import Actor
-from .routes_advisor import today_local
 from ..core.security import passwords
 from ..models.living import Budget, GroupMember, LivingGroup, PersonalTransaction
 from ..models.mysql_models import User
 from ..schemas.living import BankInfo, BudgetIn, GroupIn, JoinIn, MemberDecision, Register, TransactionIn
 
 router = APIRouter(tags=["living"])
+
+
+def today_local():
+    return datetime.now(timezone(timedelta(hours=7))).date()
 
 
 async def approved_member(sql, group_id: int, user_id: int, *, lock=False):

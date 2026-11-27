@@ -483,3 +483,52 @@ def test_receipt_sanitizer_preserves_portrait_orientation(format_name):
     with Image.open(BytesIO(cleaned)) as receipt:
         assert receipt.size == (40, 60)
         assert not receipt.getexif()
+
+
+def test_pool_meter_templates_and_monthly_export(client):
+    from datetime import datetime
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+    from app.services.monthly_reminders import LOCAL
+
+    owner_id, owner = account(client, "fund-owner")
+    member_id, member = account(client, "fund-member")
+    _, outsider = account(client, "fund-outsider")
+    root = "/api/v1/groups"
+    group = client.post(root, headers=owner, json={"name": "Utility fund"}).json()
+    path = f"{root}/{group['id']}"
+    assert client.post(f"{root}/join", headers=member, json={"group_code": group["code"]}).status_code < 300
+    assert client.patch(f"{path}/members/{member_id}", headers=owner, json={"status": "APPROVED"}).status_code == 200
+    assert client.get(f"{path}/fund", headers=outsider).status_code == 404
+    assert client.post(f"{path}/fund/adjustment", headers=member, json={"amount": 1, "note": "Correction"}).status_code == 403
+    assert client.post(f"{path}/fund/deposit", headers=member, json={"amount": 400}).status_code == 201
+    template = client.post(f"{path}/expense-templates", headers=member, json={
+        "title": "Power", "category": "HOUSING", "default_amount": 300,
+        "unit_price": 100, "last_meter_reading": 10, "participants_preset_json": [owner_id, member_id],
+    })
+    assert template.status_code == 201, template.text
+    template_id = template.json()["id"]
+    assert client.delete(f"{path}/expense-templates/{template_id}", headers=member).status_code == 403
+    expense = {"request_id": str(uuid4()), "title": "=1+1", "category": "HOUSING",
+               "amount": 300, "participants": [owner_id, member_id], "funded_by_pool": True,
+               "template_id": template_id, "old_reading": 10, "new_reading": 13, "unit_price": 100}
+    saved = client.post(f"{path}/expenses", headers=owner, json=expense)
+    assert saved.status_code == 201, saved.text
+    assert client.post(f"{path}/expenses", headers=owner, json=expense).json() == saved.json()
+    assert client.get(f"{path}/fund", headers=member).json()["balance"] == 100
+    assert client.get(f"{path}/debts/simplified", headers=member).json()["transfers"] == []
+    assert client.get(f"{path}/expense-templates", headers=member).json()[0]["last_meter_reading"] == 13
+    assert client.post(f"{path}/expenses", headers=owner, json={**expense, "request_id": str(uuid4())}).status_code == 409
+    period = datetime.now(LOCAL).strftime("%Y-%m")
+    report = f"{path}/monthly-report/export?period={period}"
+    assert client.get(report, headers=outsider).status_code == 404
+    csv = client.get(f"{report}&format=csv", headers=member)
+    assert csv.status_code == 200 and "'=1+1" in csv.text
+    xlsx = client.get(f"{report}&format=xlsx", headers=member)
+    assert xlsx.status_code == 200, xlsx.text
+    workbook = load_workbook(BytesIO(xlsx.content))
+    assert workbook.sheetnames == ["Tong_quan", "Chi_tiet_chi_tieu", "Quyet_toan"]
+    assert workbook["Chi_tiet_chi_tieu"]["B2"].data_type == "s"
+    assert list(workbook["Tong_quan"].values)[1] == (period, 300, 100, 0)
+    assert client.delete(f"{path}/expense-templates/{template_id}", headers=owner).status_code == 204

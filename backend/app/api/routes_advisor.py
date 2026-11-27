@@ -2,22 +2,20 @@ from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from .deps import Actor
-from ..models.living import Budget, DebtSplit, ExpenseParticipant, GroupExpense, GroupMember, PersonalTransaction
+from .routes_group_finance import lock_group
+from .routes_living import approved_member, today_local
+from ..models.living import GroupBudgetLimit, LivingGroup, Budget, DebtSplit, ExpenseParticipant, GroupExpense, GroupMember, PersonalTransaction
 from ..models.mysql_models import now
 from ..services.advisor import provider_reply
 from ..services.debt_simplifier import simplify_group
 
 router = APIRouter(tags=["analytics and advisor"])
 LOCAL = timezone(timedelta(hours=7))
-
-
-def today_local():
-    return datetime.now(LOCAL).date()
 
 
 def utc_start(day):
@@ -173,3 +171,70 @@ async def advisor_message(data: Prompt, request: Request, actor: Actor):
               "metrics": {key: snapshot[key] for key in ("personal", "group", "overdue")}}
     await resources.mongo.ai_chat_history.insert_one({"user_id": actor.id, **result})
     return result
+
+
+class GroupLimitIn(BaseModel):
+    monthly_limit: int = Field(ge=1, le=10**12, strict=True)
+
+
+@router.patch("/groups/{group_id}/budget-limit")
+async def set_group_limit(group_id: int, data: GroupLimitIn, request: Request, actor: Actor):
+    async with request.app.state.resources.sql.begin() as sql:
+        await lock_group(sql, group_id, actor.id)
+        group = await sql.get(LivingGroup, group_id)
+        if group.owner_id != actor.id:
+            raise HTTPException(403, "Chỉ chủ nhóm được đặt ngân sách.")
+        limit = await sql.get(GroupBudgetLimit, group_id)
+        if limit:
+            limit.monthly_limit = data.monthly_limit
+        else:
+            sql.add(GroupBudgetLimit(group_id=group_id, monthly_limit=data.monthly_limit))
+    return data
+
+
+def budget_status(spend, limit):
+    if limit and spend >= limit:
+        return "exceeded"
+    return "warning" if limit and spend * 5 >= limit * 4 else "normal"
+
+
+@router.get("/groups/{group_id}/advisor/insights")
+async def group_insights(group_id: int, request: Request, actor: Actor):
+    month = today_local().replace(day=1)
+    previous = (month - timedelta(days=1)).replace(day=1)
+    following = (month + timedelta(days=32)).replace(day=1)
+    async with request.app.state.resources.sql() as sql:
+        await approved_member(sql, group_id, actor.id)
+        limit = await sql.get(GroupBudgetLimit, group_id)
+        cap = limit.monthly_limit if limit else None
+        current = GroupExpense.created_at >= utc_start(month)
+        rows = (await sql.execute(select(current, GroupExpense.category, func.sum(GroupExpense.amount)).where(
+            GroupExpense.group_id == group_id, GroupExpense.created_at >= utc_start(previous),
+            GroupExpense.created_at < utc_start(following)).group_by(current, GroupExpense.category))).all()
+    categories = {category: int(total) for newest, category, total in rows if newest}
+    spent = sum(categories.values())
+    prior = sum(int(total) for newest, _, total in rows if not newest)
+    delta = round((spent - prior) * 100 / prior, 1) if prior else None
+    top = min(categories, key=lambda key: (-categories[key], key)) if categories else None
+    usage = round(spent * 100 / cap, 1) if cap else None
+    status = budget_status(spent, cap)
+    trend = ("Chưa có chi tiêu tháng trước để so sánh." if delta is None else
+             f"So với cả tháng trước, chi tiêu hiện tại {'tăng' if delta > 0 else 'giảm'} {abs(delta):g}%."
+             if delta else "Chi tiêu hiện tại bằng cả tháng trước.")
+    guidance = {"exceeded": "Nhóm đã chạm hoặc vượt ngân sách tháng.",
+                "warning": "Nhóm đã dùng ít nhất 80% ngân sách tháng.",
+                "normal": "Nhóm còn trong mức ngân sách." if cap else "Nhóm chưa đặt ngân sách tháng."}
+    summary = f"Tháng này nhóm đã chi {spent:,} đồng. {trend} {guidance[status]}".replace(",", ".")
+    metrics = {"period": month.strftime("%Y-%m"), "current_month_spend": spent,
+               "previous_month_spend": prior, "delta_percent": delta, "monthly_limit": cap,
+               "usage_percent": usage, "status": status, "top_category": top}
+    state = request.app.state
+    if hasattr(state, "http") and hasattr(state, "advisor_breaker"):
+        suggestion = await provider_reply(
+            "Viết một câu tiếng Việt gợi ý cách theo dõi chi tiêu nhóm. Không đưa số, không đề nghị chuyển tiền.",
+            metrics, state.http, state.advisor_breaker, gemini_only=True)
+        if suggestion and len(suggestion) <= 180 and not any(char.isdigit() for char in suggestion):
+            sentence = suggestion.strip().splitlines()[0].split(".")[0].strip()
+            if sentence:
+                summary = f"Tháng này nhóm đã chi {spent:,} đồng. {trend} {sentence}.".replace(",", ".")
+    return {**metrics, "summary": summary}

@@ -14,6 +14,9 @@ from ..services.debt_simplifier import simplify_group
 from ..services.storage_service import PROOF_IMAGE_TYPES, download, finalize, upload_ticket
 from ..services.vietqr_service import image_url
 
+from ..models.living import GroupExpenseTemplate, GroupFundTransaction
+from ..schemas.living import ExpenseTemplateIn, FundAdjustment, FundDeposit
+
 router = APIRouter(prefix="/groups/{group_id}", tags=["group-finance"])
 
 
@@ -22,7 +25,7 @@ async def allocations(sql, group_id, actor_id, data):
         GroupMember.status == "APPROVED").with_for_update())).all()
     rows = resolve_participants(data, actor_id, {member.user_id for member in members})
     required = {row["user_id"] for row in rows if row["status"] != "excluded"}
-    if not required <= {member.user_id for member in members if member.bank_bin}:
+    if not getattr(data, "funded_by_pool", False) and not required <= {member.user_id for member in members if member.bank_bin}:
         raise HTTPException(422, "Active participants need a group VietQR")
     return rows
 
@@ -43,31 +46,49 @@ async def lock_group(sql, group_id, actor_id):
 
 @router.post("/expenses", status_code=201)
 async def log_expense(group_id: int, data: GroupExpenseIn, request: Request, actor: Actor):
+    async with request.app.state.resources.sql.begin() as sql:
+        await lock_group(sql, group_id, actor.id)
+        return await save_expense(sql, group_id, actor.id, data)
+
+
+async def save_expense(sql, group_id, actor_id, data):
     # Preserve replay fingerprints created by older integer-participant clients.
-    if data.participants and isinstance(data.participants[0], int):
+    extended = data.funded_by_pool or data.template_id is not None or data.old_reading is not None
+    if not extended and data.participants and isinstance(data.participants[0], int):
         import json
         payload = data.model_dump(mode="json")
         ordered = {k: payload[k] for k in ("request_id", "title", "category", "amount", "participants", "custom_shares")}
         serialized = json.dumps(ordered, ensure_ascii=False, separators=(",", ":"))
     else:
-        serialized = data.model_dump_json()
+        serialized = data.model_dump_json(exclude=set() if extended else {"funded_by_pool", "template_id", "old_reading", "new_reading", "unit_price"})
     fingerprint = sha256(serialized.encode()).hexdigest()
-    async with request.app.state.resources.sql.begin() as sql:
-        await lock_group(sql, group_id, actor.id)
-        prior = await sql.scalar(select(GroupExpense).where(GroupExpense.group_id == group_id,
-            GroupExpense.creditor_id == actor.id, GroupExpense.request_id == str(data.request_id)).with_for_update())
-        if prior:
-            if prior.request_hash != fingerprint:
-                raise HTTPException(409, "Request ID already used for a different expense")
-            return {"id": prior.id}
-        rows = await allocations(sql, group_id, actor.id, data)
-        expense = GroupExpense(group_id=group_id, creditor_id=actor.id, request_id=str(data.request_id),
-            request_hash=fingerprint, title=data.title, category=data.category, amount=data.amount,
-            payer_share=0)
-        sql.add(expense)
-        await sql.flush()
+    prior = await sql.scalar(select(GroupExpense).where(GroupExpense.group_id == group_id,
+        GroupExpense.creditor_id == actor_id, GroupExpense.request_id == str(data.request_id)).with_for_update())
+    if prior:
+        if prior.request_hash != fingerprint:
+            raise HTTPException(409, "Request ID already used for a different expense")
+        return {"id": prior.id}
+    if data.funded_by_pool and await fund_balance(sql, group_id) < data.amount:
+        raise HTTPException(409, "S? d? qu? chung kh?ng ??.")
+    if data.template_id is not None:
+        template = await scoped_template(sql, group_id, data.template_id)
+        if data.new_reading is not None:
+            if template.last_meter_reading is not None and data.old_reading != template.last_meter_reading:
+                raise HTTPException(409, "Ch? s? ?? thay ??i. H?y t?i l?i m?u chi ti?u.")
+            template.last_meter_reading = data.new_reading
+    rows = await allocations(sql, group_id, actor_id, data)
+    expense = GroupExpense(group_id=group_id, creditor_id=actor_id, request_id=str(data.request_id),
+        request_hash=fingerprint, title=data.title, category=data.category, amount=data.amount,
+        payer_share=0)
+    sql.add(expense)
+    await sql.flush()
+    if data.funded_by_pool:
+        sql.add_all(ExpenseParticipant(expense_id=expense.id, **row) for row in rows)
+        sql.add(GroupFundTransaction(group_id=group_id, user_id=actor_id,
+            tx_type="expense_deduction", amount=-data.amount, expense_id=expense.id))
+    else:
         store_participants(sql, expense, rows)
-        return {"id": expense.id}
+    return {"id": expense.id}
 
 
 @router.put("/expenses/{expense_id}")
@@ -78,6 +99,8 @@ async def update_expense(group_id: int, expense_id: int, data: GroupExpenseUpdat
             GroupExpense.group_id == group_id, GroupExpense.creditor_id == actor.id).with_for_update())
         if not expense:
             raise HTTPException(404, "Expense unavailable")
+        if await sql.scalar(select(GroupFundTransaction.id).where(GroupFundTransaction.expense_id == expense.id)):
+            raise HTTPException(409, "Kh?ng th? s?a kho?n chi ?? tr?ch t? qu?.")
         if await sql.scalar(select(GroupProof.id).where(GroupProof.group_id == group_id,
                 GroupProof.transfer_amount.is_not(None), GroupProof.status == "PENDING").limit(1)):
             raise HTTPException(409, "A group transfer is awaiting review")
@@ -102,6 +125,8 @@ async def expenses(group_id: int, request: Request, actor: Actor, before: int | 
         rows = (await sql.scalars(query.order_by(GroupExpense.id.desc()).limit(100))).all()
         if not rows:
             return []
+        pool_expense_ids = set(await sql.scalars(select(GroupFundTransaction.expense_id).where(
+            GroupFundTransaction.group_id == group_id, GroupFundTransaction.expense_id.in_([row.id for row in rows]))))
         shares = {row.id: ([{"user_id": row.creditor_id, "amount": row.payer_share}]
                            if row.payer_share else []) for row in rows}
         splits = await sql.scalars(select(DebtSplit).where(
@@ -128,6 +153,7 @@ async def expenses(group_id: int, request: Request, actor: Actor, before: int | 
                         "paid_amount": paid, "share_amount": amount, "net": paid - amount})
         return [{**{key: getattr(row, key) for key in
                     ("id", "creditor_id", "title", "category", "amount", "created_at")},
+                 "funded_by_pool": row.id in pool_expense_ids,
                  "shares": shares[row.id], "participants": participants[row.id]} for row in rows]
 
 
@@ -347,3 +373,83 @@ async def verify_receipt(group_id: int, proof_id: int, data: VerifyIn, request: 
                 debt.proof_id = None
         sql.add(GroupEvent(proof_id=proof.id))
     return {"status": status}
+
+async def fund_balance(sql, group_id, cutoff=None):
+    query = select(func.sum(GroupFundTransaction.amount)).where(GroupFundTransaction.group_id == group_id)
+    if cutoff is not None:
+        query = query.where(GroupFundTransaction.created_at < cutoff)
+    return int(await sql.scalar(query) or 0)
+
+
+@router.get("/fund")
+async def get_fund(group_id: int, request: Request, actor: Actor):
+    async with request.app.state.resources.sql() as sql:
+        await approved_member(sql, group_id, actor.id)
+        rows = (await sql.scalars(select(GroupFundTransaction).where(
+            GroupFundTransaction.group_id == group_id).order_by(GroupFundTransaction.id.desc()).limit(100))).all()
+        return {"balance": await fund_balance(sql, group_id), "entries": rows}
+
+
+@router.post("/fund/deposit", status_code=201)
+async def deposit(group_id: int, data: FundDeposit, request: Request, actor: Actor):
+    async with request.app.state.resources.sql.begin() as sql:
+        await lock_group(sql, group_id, actor.id)
+        row = GroupFundTransaction(group_id=group_id, user_id=actor.id,
+            tx_type="deposit", amount=data.amount, note=data.note)
+        sql.add(row)
+        await sql.flush()
+        return {"id": row.id}
+
+
+async def scoped_template(sql, group_id, template_id):
+    template = await sql.scalar(select(GroupExpenseTemplate).where(
+        GroupExpenseTemplate.group_id == group_id, GroupExpenseTemplate.id == template_id))
+    if template is None:
+        raise HTTPException(404, "Không tìm thấy mẫu chi tiêu.")
+    return template
+
+
+@router.get("/expense-templates")
+async def list_templates(group_id: int, request: Request, actor: Actor):
+    async with request.app.state.resources.sql() as sql:
+        await approved_member(sql, group_id, actor.id)
+        return (await sql.scalars(select(GroupExpenseTemplate).where(
+            GroupExpenseTemplate.group_id == group_id).order_by(GroupExpenseTemplate.title))).all()
+
+
+@router.post("/expense-templates", status_code=201)
+async def create_template(group_id: int, data: ExpenseTemplateIn, request: Request, actor: Actor):
+    async with request.app.state.resources.sql.begin() as sql:
+        await lock_group(sql, group_id, actor.id)
+        for user_id in set(data.participants_preset_json):
+            await approved_member(sql, group_id, user_id)
+        row = GroupExpenseTemplate(group_id=group_id, **data.model_dump())
+        sql.add(row)
+        await sql.flush()
+        return {"id": row.id}
+
+
+@router.delete("/expense-templates/{template_id}", status_code=204)
+async def delete_template(group_id: int, template_id: int, request: Request, actor: Actor):
+    async with request.app.state.resources.sql.begin() as sql:
+        await lock_group(sql, group_id, actor.id)
+        group = await sql.get(LivingGroup, group_id)
+        if group.owner_id != actor.id:
+            raise HTTPException(403, "Chỉ chủ nhóm được xóa mẫu.")
+        await sql.delete(await scoped_template(sql, group_id, template_id))
+
+
+@router.post("/fund/adjustment", status_code=201)
+async def adjust_fund(group_id: int, data: FundAdjustment, request: Request, actor: Actor):
+    async with request.app.state.resources.sql.begin() as sql:
+        await lock_group(sql, group_id, actor.id)
+        group = await sql.get(LivingGroup, group_id)
+        if group.owner_id != actor.id:
+            raise HTTPException(403, "Chỉ chủ nhóm được điều chỉnh quỹ.")
+        if await fund_balance(sql, group_id) + data.amount < 0:
+            raise HTTPException(409, "Điều chỉnh này sẽ làm số dư quỹ bị âm.")
+        row = GroupFundTransaction(group_id=group_id, user_id=actor.id,
+            tx_type="adjustment", amount=data.amount, note=data.note)
+        sql.add(row)
+        await sql.flush()
+        return {"id": row.id}

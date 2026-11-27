@@ -2,6 +2,8 @@
 import { Copy, Settings, Users } from "lucide-react";
 import { api } from "../lib/api";
 import { type Bank, type Group, type Member, useAction, useResource } from "../lib/living";
+import GroupFund from "../components/GroupFund";
+import GroupBudgetInsights from "../components/GroupBudgetInsights";
 import GroupExpenses from "../components/GroupExpenses";
 import SmartDebtsAndQrPage from "./SmartDebtsAndQrPage";
 
@@ -47,6 +49,7 @@ export default function GroupHubPage({ groups, active, select, revision, reload,
     {notice && <p className="app-notice" role="status">{notice}</p>}
     {(action.error || directory.error) && <p className="error" role="alert">{action.error || directory.error}</p>}
     {active && <>
+      <GroupBudgetInsights group={active} revision={revision} reload={reload} />
       <div className="living-card living-row"><label className="living-check">
         <input type="checkbox" role="switch" checked={active.auto_monthly_reminder ?? true}
           disabled={active.role !== "OWNER" || action.busy} onChange={event => {
@@ -62,7 +65,8 @@ export default function GroupHubPage({ groups, active, select, revision, reload,
             setNotice(data.status === "empty" ? "Nhóm không có khoản nợ cần nhắc." : "Đã lập tổng kết và nhắc nợ trong trò chuyện nhóm.");
           })}>Chốt sổ &amp; nhắc nợ ngay</button>}</div>
       <SmartDebtsAndQrPage key={active.id} group={active} members={members} userId={userId} revision={revision} reload={reload}/>
-      <GroupExpenses groupId={active.id} members={members} userId={userId} revision={revision} reload={reload}/>
+      <GroupFund key={active.id} groupId={active.id} revision={revision} reload={reload} names={new Map(members.map(member => [member.id, member.name]))} />
+      <GroupExpenses owner={active.role === "OWNER"} groupId={active.id} members={members} userId={userId} revision={revision} reload={reload}/>
       <section className="living-card"><h2><Users size={18}/> Thành viên và yêu cầu tham gia</h2>
         <div className="group-members">{members.filter(m => m.status === "APPROVED").map(m =>
           <div key={m.id}><strong>{m.name}</strong><small>{m.qr ? "Đã có VietQR" : "Chưa có VietQR"}</small></div>)}</div>

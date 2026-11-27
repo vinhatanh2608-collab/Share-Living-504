@@ -4,7 +4,7 @@
 
 @layer base {
   :root { color-scheme: light; font-family: "Inter", "Segoe UI", system-ui, sans-serif; color: #12263b; background: #f3f6f8; }
-  body { @apply m-0 min-w-[640px]; }
+  body { @apply m-0; }
   button { @apply transition-colors; }
   button:disabled { @apply opacity-45 cursor-not-allowed; }
   :focus-visible { @apply outline outline-2 outline-offset-2 outline-cyan-600; }
@@ -35,7 +35,7 @@
   .connection i.online, .topbar i { @apply bg-teal-400; }
   .connection i.connecting { @apply bg-amber-400; }
   .identity { @apply flex items-center gap-2.5 border-t border-white/15 pt-4 text-sm font-medium; }
-  .identity > div { @apply min-w-0 flex-1 truncate; }
+  .identity > div { @apply min-w-0 flex-1; }
   .identity small { @apply tracking-normal; }
   .avatar { @apply grid h-9 w-9 shrink-0 place-items-center rounded-full bg-teal-100 text-xs font-bold text-teal-900; }
   .icon { @apply inline-grid h-9 w-9 shrink-0 place-items-center rounded-lg hover:bg-slate-500/15; }
@@ -67,7 +67,7 @@
   .section-head { @apply mb-4; }
   .section-head h2 { @apply flex items-center gap-2; }
   .empty { @apply rounded-lg border border-dashed border-slate-300 p-6 text-center text-sm text-slate-600; }
-  .pill { @apply inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold capitalize text-slate-700; }
+  .pill { @apply inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold capitalize text-slate-700; }
   .pill.wait { @apply bg-amber-100 text-amber-900; }
   .pill.late { @apply bg-rose-100 text-rose-900; }
   .debt-group h3 { @apply bg-slate-50 px-3 py-2 text-xs font-bold uppercase tracking-widest text-slate-600; }
@@ -199,3 +199,45 @@
 .group-setup summary { cursor:pointer; font-weight:700; }
 .group-setup svg, .living-card h2 svg { vertical-align:middle; }
 .group-setup[open] > .living-grid, .group-setup > .form { margin-top:1rem; }
+html { font-size:100%; overflow-x:clip; }
+body, #root { min-width:0; max-width:100%; overflow-wrap:anywhere; }
+*, *::before, *::after { box-sizing:border-box; }
+button, input, select, textarea { font:inherit; }
+button, input:not([type="checkbox"]), select, textarea, summary { min-height:2.75rem; }
+button { white-space:normal; height:auto; padding-block:.65rem; }
+button svg { flex-shrink:0; }
+.icon { min-width:2.75rem; min-height:2.75rem; }
+img, video, canvas, svg { max-width:100%; }
+.living-main, .living-toolbar > *, .living-row > *, .living-heading > *, .form > *, .panel, .page, .living-auth-panel { min-width:0; max-width:100%; }
+.living-toolbar label, .living-heading label, .living-check, .split-row, .topbar, .composer { flex-wrap:wrap; }
+.living-toolbar label { flex:1 1 16rem; }
+.living-toolbar select { flex:1 1 12rem; }
+.living-buttons > button { flex:1 1 12rem; }
+.pill { white-space:normal; overflow-wrap:anywhere; line-height:1.5; }
+.modal { max-height:90dvh; width:min(94vw,36rem); overflow-y:auto; }
+.modal-head { gap:1rem; }
+.modal-head h2 { min-width:0; }
+.modal .form > .primary:last-child { position:sticky; bottom:0; z-index:2; box-shadow:0 0 0 .4rem white; }
+.living-qr img, .directory-qr, .qr-strip img { width:100%; max-width:15rem; height:auto; aspect-ratio:1; object-fit:contain; margin-inline:auto; }
+.compact, .living-chat { max-height:none; }
+.mobile-bar, .mobile-close { display:none; }
+@media (max-width:48rem) {
+.living-shell, .shell, .living-auth, .login-layout { display:block; }
+.mobile-bar { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:.75rem; padding:1rem; background:#143e35; color:white; }
+.living-nav { display:none; }
+.living-nav.is-open { display:flex; position:fixed; inset:0 auto 0 0; width:min(90vw,22rem); z-index:51; overflow-y:auto; }
+.living-nav nav { display:grid; }
+.mobile-close { display:flex; }
+.nav-backdrop { position:fixed; inset:0; width:100%; height:100%; border:0; background:rgb(0 0 0 / 55%); z-index:50; }
+.living-grid, .living-metrics, .group-balances, .stat-grid, .directory-grid { grid-template-columns:minmax(0,1fr); }
+.living-main, .page, .login-main, .living-auth-panel { padding:1rem; }
+.living-row { align-items:stretch; }
+.living-row > .living-buttons, .living-buttons, .actions { width:100%; }
+.living-buttons > button, .actions > button { width:100%; flex-basis:100%; }
+.sidebar { position:static; height:auto; }
+.debt-row { grid-template-columns:auto minmax(0,1fr); }
+.chat { height:auto; min-height:0; overflow:visible; }
+.feed { max-height:65dvh; }
+.login-hero { padding:1.5rem; gap:2rem; }
+.login-hero h1 { font-size:2.5rem; line-height:1.15; }
+}

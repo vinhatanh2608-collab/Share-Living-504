@@ -11,6 +11,10 @@ export type Member = { id: number; name: string; status: Group["status"]; qr: Ba
 export type Debt = { id: number; title: string; amount: number; status: "UNPAID" | "PENDING" | "PAID";
   debtor_id: number; creditor_id: number; proof_id: number | null; overdue: boolean };
 export type ChatItem = { id: string; created_at: string; sender_id: number } & (
+  { kind: "expense_draft"; draft_id: string; status: "pending" | "confirmed" | "cancelled";
+    preview: { title: string; total_amount: number; participants: {
+      user_id: number; name: string; status: "paid" | "unpaid" | "excluded"; paid_amount: number
+    }[] } } |
   { kind: "TEXT"; sender_name: string; text: string } |
   { kind: "DEBT_REMINDER"; sender_name: string; debtor_ids?: number[] | null } |
   { kind: "MONTHLY_REMINDER"; title?: string | null; period?: string | null; total_amount?: number | null; transfers?: {

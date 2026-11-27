@@ -9,13 +9,15 @@ from ..core.config import settings
 logger = logging.getLogger(__name__)
 
 
-async def request_advice(client, endpoint, key, model, message, context):
+async def request_advice(client, endpoint, key, model, message, context, structured=False):
     payload = {"model": model, "max_tokens": 400, "messages": [
         {"role": "system", "content": "Explain the supplied VND household spending and budgets. "
          "Keep advice practical. Never invent figures or propose investments, loans, or money transfers."},
         {"role": "system", "content": "Authenticated account spending summary: " + json.dumps(context)},
         {"role": "user", "content": message},
     ]}
+    if structured:
+        payload["response_format"] = {"type": "json_object"}
     async with client.stream("POST", endpoint, json=payload,
                              headers={"Authorization": f"Bearer {key}", "Accept-Encoding": "identity"}) as response:
         response.raise_for_status()
@@ -28,12 +30,12 @@ async def request_advice(client, endpoint, key, model, message, context):
     return content.strip() if isinstance(content, str) else None
 
 
-async def provider_reply(message, context, client, breaker):
+async def provider_reply(message, context, client, breaker, *, structured=False, gemini_only=False):
     cfg = settings()
     if cfg.gemini_api_key:
         base = "https://generativelanguage.googleapis.com/v1beta/openai"
         key, model = cfg.gemini_api_key, cfg.gemini_model
-    elif cfg.llm_base_url and cfg.llm_api_key and cfg.llm_model:
+    elif not gemini_only and cfg.llm_base_url and cfg.llm_api_key and cfg.llm_model:
         base, key, model = cfg.llm_base_url, cfg.llm_api_key, cfg.llm_model
     else:
         return None
@@ -41,8 +43,9 @@ async def provider_reply(message, context, client, breaker):
     if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
         return None
     try:
+        args = (True,) if structured else ()
         reply = await breaker.call(request_advice, client, f"{base.rstrip('/')}/chat/completions",
-                                   key.get_secret_value(), model, message, context)
+                                   key.get_secret_value(), model, message, context, *args)
         secrets = (cfg.gemini_api_key, getattr(cfg, "llm_api_key", None))
         if reply and any(secret and secret.get_secret_value() in reply for secret in secrets):
             return None

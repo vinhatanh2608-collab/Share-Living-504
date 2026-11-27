@@ -145,3 +145,42 @@ PERFORMANCE_INDEXES = (
           GroupExpense.group_id, GroupExpense.created_at),
     Index("ix_group_events_delivery_schedule", GroupEvent.delivered, GroupEvent.next_attempt, GroupEvent.id),
 )
+class GroupFundTransaction(Base):
+    __tablename__ = "group_fund_transactions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("living_groups.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    tx_type: Mapped[str] = mapped_column(String(20))
+    amount: Mapped[int] = mapped_column(BigInteger)
+    note: Mapped[str | None] = mapped_column(String(250))
+    expense_id: Mapped[int | None] = mapped_column(ForeignKey("group_expenses.id"), unique=True)
+    created_at: Mapped[datetime] = mapped_column(default=now)
+
+
+class GroupExpenseTemplate(Base):
+    __tablename__ = "group_expense_templates"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("living_groups.id"), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    category: Mapped[str] = mapped_column(String(16))
+    default_amount: Mapped[int] = mapped_column(BigInteger)
+    meter_unit: Mapped[str | None] = mapped_column(String(20))
+    unit_price: Mapped[int | None] = mapped_column(BigInteger)
+    last_meter_reading: Mapped[int | None] = mapped_column(BigInteger)
+    participants_preset_json: Mapped[list] = mapped_column(JSON)
+
+
+class GroupExpenseDraft(Base):
+    __tablename__ = "group_expense_drafts"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("living_groups.id"), index=True)
+    sender_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    payload: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(12), default="pending")
+    expense_id: Mapped[int | None] = mapped_column(ForeignKey("group_expenses.id"))
+
+
+class GroupBudgetLimit(Base):
+    __tablename__ = "group_budget_limits"
+    group_id: Mapped[int] = mapped_column(ForeignKey("living_groups.id"), primary_key=True)
+    monthly_limit: Mapped[int] = mapped_column(BigInteger)

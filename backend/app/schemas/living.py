@@ -109,6 +109,48 @@ class GroupExpenseUpdate(BaseModel):
 
 class GroupExpenseIn(GroupExpenseUpdate):
     request_id: UUID
+    funded_by_pool: bool = False
+    template_id: int | None = Field(default=None, gt=0)
+    old_reading: WholeDong | None = None
+    new_reading: WholeDong | None = None
+    unit_price: Money | None = None
+
+    @model_validator(mode="after")
+    def validate_meter(self):
+        readings = (self.old_reading, self.new_reading, self.unit_price)
+        if any(value is not None for value in readings):
+            if any(value is None for value in readings):
+                raise ValueError("Enter both readings and the unit price")
+            if (self.new_reading - self.old_reading) * self.unit_price != self.amount:
+                raise ValueError("Amount must match meter usage and unit price")
+        return self
+
+
+class FundDeposit(BaseModel):
+    amount: Money
+    note: str | None = Field(default=None, max_length=250)
+
+
+class FundAdjustment(BaseModel):
+    amount: int = Field(ge=-(10**12), le=10**12, strict=True)
+    note: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=250)]
+
+    @field_validator("amount")
+    @classmethod
+    def nonzero(cls, value):
+        if not value:
+            raise ValueError("Adjustment must be nonzero")
+        return value
+
+
+class ExpenseTemplateIn(BaseModel):
+    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    category: Category
+    default_amount: Money
+    meter_unit: str | None = Field(default=None, max_length=20)
+    unit_price: Money | None = None
+    last_meter_reading: WholeDong | None = None
+    participants_preset_json: list[int] = Field(default_factory=list, max_length=25)
 
 
 class DebtSelection(BaseModel):

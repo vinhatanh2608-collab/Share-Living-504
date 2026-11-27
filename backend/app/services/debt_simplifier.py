@@ -4,7 +4,7 @@ from heapq import heapify, heappop, heappush
 
 from sqlalchemy import select
 
-from ..models.living import DebtSplit, ExpenseParticipant, GroupExpense, GroupMember, GroupProof
+from ..models.living import DebtSplit, ExpenseParticipant, GroupExpense, GroupMember, GroupProof, GroupFundTransaction
 from ..models.mysql_models import User
 
 
@@ -30,7 +30,7 @@ def dong(amount):
     return f"{amount:,}".replace(",", ".") + "đ"
 
 
-async def simplify_group(sql, group_id):
+async def simplify_group(sql, group_id, *, period_bounds=None):
     members = (await sql.execute(select(User.id, User.name).join(GroupMember, GroupMember.user_id == User.id)
         .where(GroupMember.group_id == group_id, GroupMember.status == "APPROVED").order_by(User.id))).all()
     totals = {uid: dict(user_id=uid, name=name, total_contributed=0, total_share=0, total_settled=0)
@@ -47,7 +47,12 @@ async def simplify_group(sql, group_id):
     reserved = defaultdict(int)
     pending = {}
     original_count = 0
-    expenses = await sql.scalars(select(GroupExpense).where(GroupExpense.group_id == group_id))
+    from_pool = select(GroupFundTransaction.id).where(GroupFundTransaction.expense_id == GroupExpense.id).exists()
+    expense_query = select(GroupExpense).where(GroupExpense.group_id == group_id, ~from_pool)
+    if period_bounds:
+        start, end = period_bounds
+        expense_query = expense_query.where(GroupExpense.created_at >= start, GroupExpense.created_at < end)
+    expenses = await sql.scalars(expense_query)
     for expense in expenses:
         rows = by_expense[expense.id]
         distribution = shares[expense.id]
@@ -76,7 +81,7 @@ async def simplify_group(sql, group_id):
         original_count += len(match_balances(balances))
     proofs = await sql.scalars(select(GroupProof).where(GroupProof.group_id == group_id,
         GroupProof.transfer_amount.is_not(None), GroupProof.status.in_(("PAID", "PENDING"))))
-    for proof in proofs:
+    for proof in (() if period_bounds else proofs):
         for uid, delta in ((proof.debtor_id, proof.transfer_amount), (proof.creditor_id, -proof.transfer_amount)):
             if uid in totals:
                 if proof.status == "PAID":
