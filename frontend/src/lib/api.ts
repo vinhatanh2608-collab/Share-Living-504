@@ -28,12 +28,15 @@ const desktopFetch: typeof fetch = (input, init) => nativeFetch(input, {
 export const api = axios.create({ baseURL: baseUrl, timeout: 12000, allowAbsoluteUrls: false,
   ...(isTauri() ? { adapter: "fetch", env: { fetch: desktopFetch } } : {}),
 });
-api.interceptors.request.use(c => {
+function validateApiUrl() {
   const url = new URL(baseUrl);
   if (url.username || url.password || url.search || url.hash || !(url.protocol === "https:" ||
       (url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname)))) {
     throw new Error("Use an HTTPS API URL for a remote server.");
   }
+}
+api.interceptors.request.use(c => {
+  validateApiUrl();
   if (access && c.url !== "/auth/login" && c.url !== "/auth/register") c.headers.Authorization = `Bearer ${access}`;
   return c;
 });
@@ -83,6 +86,47 @@ export function explain(error: unknown) {
     return `Request failed (${error.response.status}).`;
   }
   return error instanceof Error ? error.message : "Something went wrong.";
+}
+
+export async function streamAdvisor(payload: object, signal: AbortSignal, receive: (event: string, data: unknown) => void) {
+  validateApiUrl();
+  const token = access;
+  const response = await (isTauri() ? desktopFetch : fetch)(`${baseUrl}/ai-chat/stream`, {
+    method: "POST", signal, credentials: "omit", redirect: "error",
+    headers: { Accept: "text/event-stream", "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify(payload),
+  });
+  if (response.status === 401 && token && token === access) unauthorized();
+  if (!response.ok) throw new Error(serviceError(response.status, response.headers.get("Retry-After"))
+    ?? "Không thể mở cuộc trò chuyện. Vui lòng thử lại.");
+  if (!response.body || !response.headers.get("content-type")?.startsWith("text/event-stream"))
+    throw new Error("Phản hồi của Trợ lý không hợp lệ.");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  let complete = false;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      pending += decoder.decode(value, { stream: !done });
+      const parts = pending.split(/\r?\n\r?\n/);
+      pending = parts.pop() ?? "";
+      for (const part of parts) {
+        const name = /^event: (.+)$/m.exec(part)?.[1];
+        const data = /^data: (.+)$/m.exec(part)?.[1];
+        if (!name || !data) continue;
+        receive(name, JSON.parse(data));
+        if (name === "done") complete = true;
+      }
+      if (done) break;
+    }
+    if (!complete) throw new Error("Kết nối bị gián đoạn. Hãy tải lại lịch sử trước khi thử lại.");
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
 }
 
 function safeObjectUrl(value: string) {

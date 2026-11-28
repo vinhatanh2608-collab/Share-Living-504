@@ -198,3 +198,19 @@ PERFORMANCE_INDEXES += (
     Index("ix_group_proof_creditor_status", GroupProof.creditor_id, GroupProof.status),
     Index("ix_group_debt_debtor_status", DebtSplit.debtor_id, DebtSplit.status),
 )
+
+
+class AdvisorAction(Base):
+    __tablename__ = "advisor_actions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    tool: Mapped[str] = mapped_column(String(50))
+    payload: Mapped[dict] = mapped_column(JSON)
+    changes: Mapped[dict | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(12))
+    created_at: Mapped[datetime] = mapped_column(default=now)
+class AdvisorOverallBudget(Base):
+    __tablename__ = "advisor_overall_budgets"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    month: Mapped[date] = mapped_column(primary_key=True)
+    monthly_limit: Mapped[int] = mapped_column(BigInteger)

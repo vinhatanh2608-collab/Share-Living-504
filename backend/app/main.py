@@ -52,6 +52,7 @@ async def lifespan(app):
         else:
             await resources.mongo.group_messages.create_index([("group_id", 1), ("created_at", -1), ("_id", -1)])
             await resources.mongo.ai_chat_history.create_index([("user_id", 1), ("_id", -1)])
+            await resources.mongo.ai_chat_history.create_index([("user_id", 1), ("session_id", 1), ("_id", -1)])
             await resources.mongo.ai_chat_history.create_index([("user_id", 1), ("created_at", -1)])
             await resources.mongo.group_messages.create_index("created_at")
             await resources.mongo.ai_chat_history.create_index("created_at")

@@ -265,3 +265,4 @@ img, video, canvas, svg { max-width:100%; }
 @media (max-width: 48rem) {
   .living-nav .drawer-guide { display: flex; }
 }
+.advisor-progress { display: block; width: 100%; accent-color: #235c4e; }

@@ -1,9 +1,16 @@
+import asyncio
+import json
+import logging
+import re
+from uuid import UUID
+
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import case, func, select, union_all
 
 from .deps import Actor
@@ -15,7 +22,13 @@ from ..models.archive import DebtHistory, GroupHistory, ParticipantHistory, Pers
 from ..models.living import GroupBudgetLimit, LivingGroup, Budget, DebtSplit, GroupExpense, GroupFundTransaction, GroupMember, GroupProof
 from ..models.mysql_models import now
 from ..services.advisor import provider_reply
+from ..services import ai_advisor_service as agent
+from ..services.advisor_intent import gemini_intent, local_intent
+from ..services.chat_expense import normalize
+from ..models.living import AdvisorAction
+from ..schemas.advisor import Correction, GroupId, TOOLS, WRITE_TOOLS
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["analytics and advisor"])
 LOCAL = timezone(timedelta(hours=7))
 
@@ -185,11 +198,43 @@ def local_reply(snapshot, personal):
     return "\n".join(advice), actions
 
 
-@router.get("/ai-chat/history")
-async def advisor_history(request: Request, actor: Actor):
-    collection = request.app.state.resources.mongo.ai_chat_history
-    rows = await collection.find({"user_id": actor.id}, {"_id": 0, "user_id": 0, "created_at": 0}).sort("_id", -1).limit(50).to_list(50)
+def history_filter(uid, session_id):
+    selector = {"user_id": uid}
+    if session_id is not None:
+        selector["session_id"] = str(session_id)
+    return selector
+
+
+async def load_history(resources, uid, session_id=None, limit=50):
+    rows = await resources.mongo.ai_chat_history.find(history_filter(uid, session_id),
+        {"_id": 0, "user_id": 0, "created_at": 0}).sort("_id", -1).limit(limit).to_list(limit)
+    ids = [row["action"]["id"] for row in rows if row.get("action")]
+    protected = any(row.get("group_scopes") for row in rows)
+    if ids or protected:
+        async with resources.sql() as sql:
+            allowed = set(await agent.scopes(sql, uid)) if protected else set()
+            actions = await sql.scalars(select(AdvisorAction).where(
+                AdvisorAction.user_id == uid, AdvisorAction.id.in_(ids))) if ids else []
+            current = {action.id: agent.card(action) for action in actions}
+        rows = [row for row in rows if allowed.issuperset(row.get("group_scopes", ()))]
+
+        for row in rows:
+            if row.get("action"):
+                row["action"] = current.get(row["action"]["id"])
+    for row in rows:
+        row.pop("group_scopes", None)
     return list(reversed(rows))
+
+
+@router.get("/ai-chat/history")
+async def advisor_history(request: Request, actor: Actor, session_id: UUID | None = None,
+                          limit: int = Query(50, ge=1, le=50)):
+    return await load_history(request.app.state.resources, actor.id, session_id, limit)
+
+
+@router.delete("/ai-chat/history", status_code=204)
+async def clear_advisor_history(request: Request, actor: Actor, session_id: UUID | None = None):
+    await request.app.state.resources.mongo.ai_chat_history.delete_many(history_filter(actor.id, session_id))
 
 
 @router.post("/ai-chat/message")
@@ -279,3 +324,141 @@ async def group_insights(group_id: int, request: Request, actor: Actor):
             if sentence:
                 summary = f"Tháng này nhóm đã chi {spent:,} đồng. {trend} {sentence}.".replace(",", ".")
     return {**metrics, "summary": summary}
+
+
+class AgentPrompt(Prompt):
+    session_id: UUID | None = None
+    group_id: GroupId | None = None
+
+
+FOLLOW_UPS = ["Tháng này tôi đã chi bao nhiêu?", "Còn tháng trước thì sao?", "Nhóm còn khoản nợ nào?"]
+
+
+async def invalidate_advisor_cache(request):
+    cache = getattr(request.app.state, "cache", None)
+    if cache:
+        await cache.invalidate()
+
+
+@router.post("/ai-chat/actions/{action_id}/confirm")
+async def confirm_advisor_action(action_id: UUID, request: Request, actor: Actor):
+    result = await agent.apply_action(request.app.state.resources, actor.id, str(action_id))
+    await invalidate_advisor_cache(request)
+    return result
+
+
+@router.post("/ai-chat/actions/{action_id}/undo")
+async def undo_advisor_action(action_id: UUID, request: Request, actor: Actor):
+    result = await agent.undo_action(request.app.state.resources, actor.id, str(action_id))
+    await invalidate_advisor_cache(request)
+    return result
+
+
+def event(kind, data):
+    return f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+async def run_agent(request, uid, data, history):
+    state = request.app.state
+    local = local_intent(data.text, today_local(), history, data.group_id)
+    external = None
+    if data.use_external and (not local or local[0] not in {"correct", "guide", "undo_last_ai_action"}):
+        # Share only the typed prompt, date, selected group ID and previous user prompts after opt-in.
+        external = await gemini_intent(state, data.text, {"today": today_local().isoformat(),
+            "selected_group": data.group_id, "previous_prompts": [row["prompt"][:350] for row in history[-4:]]})
+    action, visual = None, {}
+    if not external and not local:
+        return ("Hãy thử hỏi về chi tiêu, ngân sách, công nợ hoặc nhập “ăn sáng 35k, đổ xăng 50k”. "
+                "Khi ghi khoản chi nhóm, hãy chọn nhóm và nêu cách chia.", action, visual, "local")
+    name, raw = external or local
+    if name == "guide" and not external:
+        return raw, None, {}, "local"
+    schema = Correction if name == "correct" and not external else TOOLS.get(name)
+    try:
+        if schema is None:
+            raise ValueError("Unknown tool")
+        args = schema.model_validate(raw)
+    except (ValidationError, ValueError):
+        if external and local:
+            name, raw = local
+            try:
+                args = (Correction if name == "correct" else TOOLS[name]).model_validate(raw)
+            except ValidationError:
+                return "Thông tin chưa hợp lệ. Hãy kiểm tra số tiền hoặc ngày.", None, {}, "local"
+            external = None
+        else:
+            return "Thông tin chưa hợp lệ. Hãy kiểm tra số tiền hoặc ngày.", None, {}, "local"
+    if name in WRITE_TOOLS:
+        if name == "create_group_expense_draft_or_record" and args.split_type == "clarify":
+            return "Bạn muốn chia đều cho tất cả thành viên hay chia theo phần riêng? Hãy ghi rõ cách chia.", None, {}, "local"
+        action = await agent.stage(state.resources, uid, name, args)
+        reply = "Kiểm tra thông tin trên thẻ rồi bấm Xác nhận để lưu."
+    elif name == "undo_last_ai_action":
+        if external:
+            return "Chọn Hoàn tác trên thẻ của khoản bạn muốn đổi.", None, {}, "provider"
+        action = await agent.undo_action(state.resources, uid, args.action_id)
+        await invalidate_advisor_cache(request)
+        reply = "Đã hoàn tác."
+    elif name == "correct":
+        action = await agent.correct_action(state.resources, uid, args)
+        await invalidate_advisor_cache(request)
+        reply = "Đã sửa số tiền của khoản chi vừa ghi."
+    else:
+        group_scope = None
+        if name == "get_spending_analytics":
+            normalized = normalize(data.text)
+            if "nhom" in normalized.split():
+                if not data.group_id:
+                    return "Hãy chọn một nhóm đã được duyệt để xem chi tiêu nhóm.", None, {}, "local"
+                group_scope = data.group_id
+            elif "thang truoc" in normalized and history:
+                prior = (history[-1].get("visual") or {}).get("budget") or {}
+                group_scope = prior.get("group_id")
+                if args.category is None and prior.get("category"):
+                    args = args.model_copy(update={"category": prior["category"]})
+        reply, visual = await agent.read_tool(request, uid, name, args, group_scope)
+    return reply, action, visual, "provider" if external else "local"
+
+
+@router.post("/ai-chat/stream")
+async def advisor_stream(data: AgentPrompt, request: Request, actor: Actor):
+    resources = request.app.state.resources
+    if data.group_id is not None:
+        async with resources.sql() as sql:
+            await approved_member(sql, data.group_id, actor.id)
+    history = await load_history(resources, actor.id, data.session_id, limit=8)
+
+    async def stream():
+        yield event("status", {"text": "Đang phân tích yêu cầu và kiểm tra dữ liệu…"})
+        try:
+            reply, action, visual, source = await run_agent(request, actor.id, data, history)
+            group_scopes = visual.pop("group_scopes", [])
+            if action and action["tool"] == "create_group_expense_draft_or_record":
+                group_scopes.append(action["details"]["group_id"])
+            turn = {"prompt": data.text, "reply": reply, "quick_actions": [], "source": source,
+                    "metrics": {"personal": 0, "group": 0, "overdue": 0}, "action": action,
+                    "visual": visual, "suggestions": FOLLOW_UPS}
+            await resources.mongo.ai_chat_history.insert_one({"user_id": actor.id, "created_at": now(),
+                "session_id": str(data.session_id) if data.session_id else None, "group_scopes": group_scopes, **turn})
+        except HTTPException as exc:
+            yield event("error", {"text": "Bạn không có quyền truy cập dữ liệu này." if exc.status_code in {403, 404}
+                        else exc.detail})
+            return
+        except Exception:
+            logger.exception("Advisor stream failed")
+            yield event("error", {"text": "Trợ lý đang bận. Vui lòng thử lại."})
+            return
+        for match in re.finditer(r".{1,60}", reply, flags=re.S):
+            yield event("text", {"text": match[0]})
+            await asyncio.sleep(0)
+        if action:
+            if action["status"] == "applied":
+                yield event("status", {"text": "Đã cập nhật sổ chi tiêu."})
+            elif action["status"] == "proposed":
+                yield event("status", {"text": "Đã chuẩn bị bản nháp để bạn xem lại."})
+            yield event("action", action)
+        yield event("suggestions", FOLLOW_UPS)
+        yield event("done", turn)
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

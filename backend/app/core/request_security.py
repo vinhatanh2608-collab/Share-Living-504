@@ -47,13 +47,13 @@ class RequestSecurity:
         if scope["method"] == "POST":
             if path in {"/auth/login", "/auth/register"}:
                 rules.append((path, self.config.auth_requests_per_minute, 60))
-            elif path == "/ai-chat/message":
+            elif path in {"/ai-chat/message", "/ai-chat/stream"}:
                 rules.extend((("advisor", self.config.ai_requests_per_minute, 60),
                               ("advisor", self.config.ai_requests_per_hour, 3600)))
             elif receipt:
                 rules.append(("receipt", self.config.receipt_requests_per_minute, 60))
         if scope["method"] in {"POST", "PUT", "PATCH", "DELETE"} and (
-            path.startswith(("/groups/", "/finance/", "/personal-expenses")) or path == "/groups"
+            path.startswith(("/groups/", "/finance/", "/personal-expenses", "/ai-chat/actions/")) or path == "/groups"
         ):
             rules.append(("write", self.config.write_requests_per_minute, 60))
         for name, limit, window in rules:
@@ -184,7 +184,7 @@ class RequestSecurity:
                     return {"type": "http.request", "body": result, "more_body": False}
                 return await receive()
 
-            if receipt or path == "/ai-chat/message":
+            if receipt or path in {"/ai-chat/message", "/ai-chat/stream"}:
                 if self.slots.locked():
                     return await reject(503, "Service temporarily busy", {"Retry-After": "1"})
                 async with self.slots:
