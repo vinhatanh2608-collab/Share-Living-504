@@ -20,7 +20,16 @@ class Settings(BaseSettings):
     ai_requests_per_minute: int = Field(default=10, ge=1, le=10000)
     ai_requests_per_hour: int = Field(default=60, ge=1, le=10000)
     receipt_requests_per_minute: int = Field(default=10, ge=1, le=10000)
-    mysql_url: str
+    mysql_url: str = Field(validation_alias=AliasChoices("DATABASE_URL", "MYSQL_URL"))
+    database_read_url: str | None = None
+    redis_url: str | None = "redis://127.0.0.1:6379/0"
+    redis_namespace: str = "shared-living:v1"
+    write_requests_per_minute: int = Field(default=60, ge=1, le=10000)
+    db_query_timeout_ms: int = Field(default=5000, ge=100, le=60000)
+    request_timeout_seconds: int = Field(default=45, ge=1, le=300)
+    mysql_pool_size: int = Field(default=6, ge=1, le=30)
+    mysql_max_overflow: int = Field(default=6, ge=0, le=30)
+    mongo_pool_size: int = Field(default=15, ge=2, le=50)
     mongo_url: str
     mongo_database: str = "dorm"
     jwt_secret: SecretStr = Field(validation_alias=AliasChoices("JWT_SECRET", "SECRET_KEY"))

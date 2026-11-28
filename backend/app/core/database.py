@@ -1,13 +1,22 @@
+import asyncio
+import logging
+from time import monotonic
+
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError, TimeoutError as PoolTimeout
 from threading import Lock
 
+from pymongo.errors import ConnectionFailure, NetworkTimeout
 from pymongo.monitoring import ConnectionPoolListener
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from motor.motor_asyncio import AsyncIOMotorClient
 from .config import settings
+from ..models import archive  # Register archive tables before create_all.
 from ..models.mysql_models import Base
 from ..models.living import PERFORMANCE_INDEXES
 
+
+logger = logging.getLogger(__name__)
 
 def initialize_mysql_schema(connection):
     Base.metadata.create_all(connection)
@@ -32,7 +41,8 @@ def initialize_mysql_schema(connection):
 
 
 class MongoPoolMetrics(ConnectionPoolListener):
-    def __init__(self):
+    def __init__(self, capacity):
+        self.capacity = capacity
         self.lock = Lock()
         self.checked_out = 0
         self.checkout_failures = 0
@@ -51,7 +61,7 @@ class MongoPoolMetrics(ConnectionPoolListener):
 
     def snapshot(self):
         with self.lock:
-            return {"checked_out": self.checked_out, "capacity_per_server": 20,
+            return {"checked_out": self.checked_out, "capacity_per_server": self.capacity,
                     "checkout_failures": self.checkout_failures}
 
     # PyMongo requires listeners to implement all pool event callbacks.
@@ -65,15 +75,52 @@ class MongoPoolMetrics(ConnectionPoolListener):
 class Resources:
     def __init__(self):
         cfg = settings()
-        self.engine = create_async_engine(cfg.mysql_url, pool_pre_ping=True,
-                                          pool_recycle=1800, pool_size=10, max_overflow=15, pool_timeout=5,
-                                          hide_parameters=True)
+        self.cfg = cfg
+        self.engine = self.make_engine(cfg.mysql_url, cfg.mysql_pool_size, cfg.mysql_max_overflow)
         self.sql = async_sessionmaker(self.engine, expire_on_commit=False)
-        self.mongo_pool = MongoPoolMetrics()
-        self.mongo_client = AsyncIOMotorClient(cfg.mongo_url, maxPoolSize=20, minPoolSize=2, maxIdleTimeMS=30000, waitQueueTimeoutMS=5000, serverSelectionTimeoutMS=5000,
-                                              socketTimeoutMS=10000, connectTimeoutMS=3000, tz_aware=True,
-                                              event_listeners=[self.mongo_pool])
+        self.replica = self.replica_sql = None
+        self.replica_retry_at = self.replica_failures = 0
+        if cfg.database_read_url:
+            try:
+                self.replica = self.make_engine(cfg.database_read_url, 2, 1)
+                self.replica_sql = async_sessionmaker(self.replica, expire_on_commit=False)
+            except (ValueError, TypeError, ImportError, SQLAlchemyError):
+                logger.warning("Read replica configuration unavailable. Reads will use primary.")
+        self.mongo_pool = MongoPoolMetrics(cfg.mongo_pool_size)
+        self.mongo_client = AsyncIOMotorClient(cfg.mongo_url, maxPoolSize=cfg.mongo_pool_size, minPoolSize=0,
+            maxIdleTimeMS=30000, waitQueueTimeoutMS=2000, serverSelectionTimeoutMS=3000,
+            socketTimeoutMS=cfg.db_query_timeout_ms, timeoutMS=cfg.db_query_timeout_ms,
+            connectTimeoutMS=2000, tz_aware=True, event_listeners=[self.mongo_pool])
         self.mongo = self.mongo_client[cfg.mongo_database]
+
+    def make_engine(self, url, size, overflow):
+        timeout = self.cfg.db_query_timeout_ms
+        return create_async_engine(url, pool_pre_ping=True, pool_recycle=900, pool_size=size,
+            max_overflow=overflow, pool_timeout=2, hide_parameters=True,
+            connect_args={"connect_timeout": 2, "init_command": (
+                f"SET SESSION MAX_EXECUTION_TIME={timeout}, SESSION innodb_lock_wait_timeout=5"
+            )})
+
+    async def read(self, query):
+        """Replay only read-only operations, never write transactions."""
+        if self.replica_sql and monotonic() >= self.replica_retry_at:
+            try:
+                async with asyncio.timeout(self.cfg.db_query_timeout_ms / 1000):
+                    async with self.replica_sql() as sql:
+                        status = (await sql.execute(text("SHOW REPLICA STATUS"))).mappings().first()
+                        if (not status or status["Replica_IO_Running"] != "Yes" or status["Replica_SQL_Running"] != "Yes"
+                            or status["Seconds_Behind_Source"] is None or status["Seconds_Behind_Source"] > 5):
+                            raise OSError("Replica replication is unavailable or delayed")
+                        await sql.execute(text("START TRANSACTION READ ONLY"))
+                        result = await query(sql)
+                self.replica_failures = 0
+                return result
+            except (DBAPIError, PoolTimeout, TimeoutError, OSError):
+                self.replica_failures += 1
+                self.replica_retry_at = monotonic() + min(60, 2 ** min(6, self.replica_failures))
+                logger.warning("Read replica unavailable. Falling back to primary.")
+        async with self.sql() as sql:
+            return await query(sql)
 
     async def initialize_schema(self):
         async with self.engine.begin() as connection:
@@ -93,4 +140,25 @@ class Resources:
 
     async def close(self):
         self.mongo_client.close()
+        if self.replica is not None:
+            await self.replica.dispose()
         await self.engine.dispose()
+
+
+async def read_query(resources, query):
+    reader = getattr(resources, "read", None)
+    if reader:
+        return await reader(query)
+    async with resources.sql() as sql:
+        return await query(sql)
+
+
+async def retry_startup(operation, label):
+    for attempt in range(3):
+        try:
+            return await operation()
+        except (DBAPIError, PoolTimeout, ConnectionFailure, NetworkTimeout, OSError):
+            if attempt == 2:
+                raise
+            logger.warning("%s startup temporarily unavailable. Retrying.", label)
+            await asyncio.sleep(.5 * 2**attempt)

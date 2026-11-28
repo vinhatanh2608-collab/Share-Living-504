@@ -67,3 +67,57 @@ python -m unittest discover -s tests -v
 ```
 
 The suite checks VND splitting, approval authorization, idempotent settlement and outbox writes, OpenAPI, and WebSocket event audience. The API transaction tests use SQLite and do not validate MySQL row locking, MongoDB delivery, or live object-storage signing; run the full receipt flow against Compose and your R2 bucket before deployment.
+
+## Database operations
+
+Install backend dependencies in the repository virtual environment first. Run these commands from the repository root unless stated otherwise.
+
+### Normal startup
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+.\start.ps1 -WebOnly
+```
+
+To start the data services alone, run `docker compose up -d --wait` inside `backend`. The default profile starts MySQL, MongoDB, Redis and LocalStack. Redis is memory bounded and bound to loopback. Set `REDIS_URL=` to disable it. On a Redis error the API reads from MySQL and uses local request counters. WebSocket state and login cooldowns remain local to a process, so continue to use one API worker.
+
+Use `DATABASE_URL` or the existing `MYSQL_URL` for the primary. Keep `DATABASE_READ_URL` unset in normal mode. MySQL queries and MongoDB operations have configurable time limits, and the request deadline is separate. Cache entries expire after a short TTL. Successful relevant writes rotate a shared cache generation.
+
+### Optional MySQL replica
+
+Run from `backend`, with the API stopped for the initial seed so schema changes cannot overlap the snapshot:
+
+```powershell
+docker compose --profile ha up -d --wait
+..\.venv\Scripts\python.exe -m scripts.setup_mysql_replica
+docker compose --profile ha exec mysql-replica mysql -uroot -p -e 'SHOW REPLICA STATUS\G'
+```
+
+The seed command requires an empty replica database and leaves the primary data in place. Check `Replica_IO_Running` and `Replica_SQL_Running` before enabling the reader. Set `DATABASE_READ_URL` in `.env` to the replica URL on port 3307 and restart the API. The replica account needs `REPLICATION CLIENT` for the health and lag check. Analytics and monthly report reads can use it. Identity, membership and writes use the primary. If the reader is down or more than five seconds behind, the API falls back to primary and retries the reader with backoff. Writes require a working primary.
+
+### Cold archive
+
+Run from `backend`:
+
+```powershell
+..\.venv\Scripts\python.exe -m app.scripts.archive_old_data --batch-size 100 --max-batches 10
+```
+
+This moves personal records and eligible fully settled group expenses older than 12 calendar months, in batches. Historical lists, reports and expense retry IDs continue to work. Group expenses linked to fund transactions or chat drafts stay in the active tables to preserve their references. Add `--retention-days 365` only if you want to permanently delete chat and AI history older than 365 days. By default, document history is retained.
+
+### Backups and restore
+
+```powershell
+.\backend\scripts\backup_db.ps1
+.\backend\scripts\backup_db.ps1 -RegisterTask
+```
+
+The Windows task runs at 02:00 local machine time under the current user and needs access to Docker. The API also checks daily from 02:00 Vietnam time while it is running. Both use the same lock and daily archive check. On Linux/macOS run `sh backend/scripts/backup_db.sh` or schedule that command with `--daily`. Archives are stored in `backend/backups/`. Retention defaults to 14 archives and 14 days, controlled by `BACKUP_KEEP_COUNT` and `BACKUP_RETENTION_DAYS`. The manifest records whether MongoDB was running and included. LocalStack objects are outside these database dumps.
+
+To restore a trusted backup, stop the API, leave the destination Compose database services running, and explicitly confirm replacement. The restore affects the database tables and collections present in the dumps and is not atomic across the two databases. Verify backups against a disposable database before relying on them.
+
+```powershell
+.\backend\scripts\backup_db.ps1 -Restore .\backend\backups\shared_living_YYYYMMDD_HHMMSS.zip -ConfirmReplace
+```
+
+On Linux/macOS run `sh backend/scripts/backup_db.sh --restore PATH --confirm-replace`.

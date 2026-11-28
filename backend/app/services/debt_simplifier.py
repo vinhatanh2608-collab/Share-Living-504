@@ -4,7 +4,8 @@ from heapq import heapify, heappop, heappush
 
 from sqlalchemy import select
 
-from ..models.living import DebtSplit, ExpenseParticipant, GroupExpense, GroupMember, GroupProof, GroupFundTransaction
+from ..models.archive import DebtHistory, GroupHistory, ParticipantHistory
+from ..models.living import GroupMember, GroupProof, GroupFundTransaction
 from ..models.mysql_models import User
 
 
@@ -35,23 +36,21 @@ async def simplify_group(sql, group_id, *, period_bounds=None):
         .where(GroupMember.group_id == group_id, GroupMember.status == "APPROVED").order_by(User.id))).all()
     totals = {uid: dict(user_id=uid, name=name, total_contributed=0, total_share=0, total_settled=0)
               for uid, name in members}
+    from_pool = select(GroupFundTransaction.id).where(GroupFundTransaction.expense_id == GroupHistory.id).exists()
+    expense_query = select(GroupHistory).where(GroupHistory.group_id == group_id, ~from_pool)
+    if period_bounds:
+        start, end = period_bounds
+        expense_query = expense_query.where(GroupHistory.created_at >= start, GroupHistory.created_at < end)
+    matching = expense_query.with_only_columns(GroupHistory.id)
     shares = defaultdict(dict)
-    details = await sql.scalars(select(ExpenseParticipant).join(GroupExpense)
-                                .where(GroupExpense.group_id == group_id))
-    for row in details:
+    for row in await sql.scalars(select(ParticipantHistory).where(ParticipantHistory.expense_id.in_(matching))):
         shares[row.expense_id][row.user_id] = (row.paid_amount, row.share_amount)
-    splits = await sql.scalars(select(DebtSplit).join(GroupExpense).where(GroupExpense.group_id == group_id))
     by_expense = defaultdict(list)
-    for split in splits:
+    for split in await sql.scalars(select(DebtHistory).where(DebtHistory.expense_id.in_(matching))):
         by_expense[split.expense_id].append(split)
     reserved = defaultdict(int)
     pending = {}
     original_count = 0
-    from_pool = select(GroupFundTransaction.id).where(GroupFundTransaction.expense_id == GroupExpense.id).exists()
-    expense_query = select(GroupExpense).where(GroupExpense.group_id == group_id, ~from_pool)
-    if period_bounds:
-        start, end = period_bounds
-        expense_query = expense_query.where(GroupExpense.created_at >= start, GroupExpense.created_at < end)
     expenses = await sql.scalars(expense_query)
     for expense in expenses:
         rows = by_expense[expense.id]
@@ -79,9 +78,10 @@ async def simplify_group(sql, group_id, *, period_bounds=None):
                                               creditor_id=expense.creditor_id, amount=0))
                     card["amount"] += row.amount
         original_count += len(match_balances(balances))
-    proofs = await sql.scalars(select(GroupProof).where(GroupProof.group_id == group_id,
-        GroupProof.transfer_amount.is_not(None), GroupProof.status.in_(("PAID", "PENDING"))))
-    for proof in (() if period_bounds else proofs):
+    proofs = [] if period_bounds else await sql.scalars(select(GroupProof).where(
+        GroupProof.group_id == group_id, GroupProof.transfer_amount.is_not(None),
+        GroupProof.status.in_(("PAID", "PENDING"))))
+    for proof in proofs:
         for uid, delta in ((proof.debtor_id, proof.transfer_amount), (proof.creditor_id, -proof.transfer_amount)):
             if uid in totals:
                 if proof.status == "PAID":

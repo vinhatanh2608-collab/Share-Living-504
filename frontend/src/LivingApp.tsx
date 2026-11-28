@@ -3,6 +3,7 @@ import { Menu, X, BarChart3, Bell, Building2, Landmark, LogOut, MessageCircle, S
 import { type Group, realtimeUpdate, useAction, useResource } from "./lib/living";
 import { enableAlerts, notify } from "./lib/notify";
 import GroupBudgetInsights from "./components/GroupBudgetInsights";
+import UserGuideModal from "./components/UserGuideModal";
 import AiAdvisorPage from "./pages/AiAdvisorPage";
 import GroupChatPage from "./pages/GroupChatPage";
 import GroupHubPage from "./pages/GroupHubPage";
@@ -20,9 +21,19 @@ const pages = [
 ] as const;
 type Page = typeof pages[number][0];
 
+const guideKey = "shared_living_guide_dismissed";
+
 function Workspace({ user, token }: { user: User; token: string }) {
   const logout = useAuthStore(state => state.logout);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
+  const [welcome, setWelcome] = useState(() => {
+    try { return localStorage.getItem(guideKey) !== "1"; } catch { return true; }
+  });
+  function dismissWelcome() {
+    setWelcome(false);
+    try { localStorage.setItem(guideKey, "1"); } catch { /* Storage unavailable. */ }
+  }
   const [page, setPage] = useState<Page>("overview");
   const [groupId, setGroupId] = useState<number>();
   const [revision, setRevision] = useState(0);
@@ -55,13 +66,13 @@ function Workspace({ user, token }: { user: User; token: string }) {
     return () => document.removeEventListener("keydown", escape);
   }, [menuOpen]);
   return <div className="living-shell">
-    <div className="mobile-bar"><strong>Shared Living</strong><button className="secondary" aria-expanded={menuOpen} aria-controls="workspace-navigation" onClick={() => setMenuOpen(!menuOpen)}><Menu aria-hidden="true" size={22}/> Menu nh?m</button></div>
-    {menuOpen && <button className="nav-backdrop" aria-label="??ng menu" onClick={() => setMenuOpen(false)}/> }
+    <div className="mobile-bar"><strong>Shared Living</strong><button className="secondary" aria-expanded={menuOpen} aria-controls="workspace-navigation" onClick={() => setMenuOpen(!menuOpen)}><Menu aria-hidden="true" size={22}/> Menu nhóm</button></div>
+    {menuOpen && <button className="nav-backdrop" aria-label="Đóng menu" onClick={() => setMenuOpen(false)}/> }
     <aside id="workspace-navigation" className={`living-nav${menuOpen ? " is-open" : ""}`}>
-      <button className="mobile-close secondary" onClick={() => setMenuOpen(false)}><X aria-hidden="true" size={22}/> ??ng menu</button>
+      <button className="mobile-close secondary" onClick={() => setMenuOpen(false)}><X aria-hidden="true" size={22}/> Đóng menu</button>
       <div className="living-brand"><Building2 size={23} /><strong>Shared Living</strong></div>
       <nav aria-label="Workspace">{pages.map(([id, label, Icon]) => <button key={id}
-        aria-current={page === id ? "page" : undefined} onClick={() => { setPage(id); setMenuOpen(false); }}><Icon size={19} />{label}</button>)}</nav>
+        aria-current={page === id ? "page" : undefined} onClick={() => { setPage(id); setMenuOpen(false); }}><Icon size={19} />{label}</button>)}<button className="drawer-guide" onClick={() => { setMenuOpen(false); setGuideOpen(true); }}>? Hướng dẫn</button></nav>
       <div className="living-account"><strong>{user.name}</strong><button onClick={logout}><LogOut size={16} /> Đăng xuất</button></div>
     </aside>
     <main className="living-main">
@@ -74,7 +85,19 @@ function Workspace({ user, token }: { user: User; token: string }) {
         <button className="secondary" disabled={alerts || action.busy} onClick={() => void action.run(async () => {
           const allowed = await enableAlerts(); setAlerts(allowed); setNotice(allowed ? "Đã bật thông báo." : "Chưa được cấp quyền thông báo.");
         })}><Bell size={17} />{alerts ? "Đã bật thông báo" : "Bật thông báo"}</button>
+        <button className="secondary guide-trigger" onClick={() => setGuideOpen(true)}>? Hướng dẫn</button>
       </header>
+      {welcome && (page === "overview" || page === "groups") && <section className="living-card living-stack guide-welcome">
+        <h2>Chào mừng đến với Shared Living</h2>
+        <div className="living-buttons">
+          <button className="primary" onClick={() => setGuideOpen(true)}>Xem hướng dẫn nhanh</button>
+          <button className="secondary" onClick={dismissWelcome}>Ẩn lời chào</button>
+        </div>
+      </section>}
+      {guideOpen && <UserGuideModal close={() => setGuideOpen(false)} go={destination => {
+        setPage(destination);
+        setGuideOpen(false);
+      }} />}
       {status !== "online" && <p className="app-notice" role="status">{realtimeError || "Đang kết nối lại để nhận cập nhật trực tiếp. Dữ liệu hiển thị có thể chưa mới nhất."}</p>}
       {notice && <div className="app-notice" role="status">{notice}<button className="secondary" onClick={() => setNotice("")}>Đóng</button></div>}
       {(groups.error || action.error) && <p className="error" role="alert">{groups.error || action.error}</p>}
@@ -86,7 +109,7 @@ function Workspace({ user, token }: { user: User; token: string }) {
         select={setGroupId} reload={reload} revision={revision} />}
       {page === "advisor" && <div className="living-stack">
         {active && <GroupBudgetInsights key={active.id} group={active} revision={revision} reload={reload} />}
-        <AiAdvisorPage revision={revision} reload={reload} />
+        <AiAdvisorPage key={active?.id} groupId={active?.id} revision={revision} reload={reload} />
       </div>}
       {page === "debts" && active && <SmartDebtsAndQrPage key={active.id} group={active} userId={user.id} revision={revision} reload={reload} />}
       {page === "chat" && active && <GroupChatPage key={active.id} group={active} userId={user.id} revision={revision} reload={reload} />}
@@ -99,5 +122,10 @@ function Workspace({ user, token }: { user: User; token: string }) {
 
 export default function LivingApp() {
   const { user, token } = useAuthStore();
-  return user && token ? <Workspace key={user.id} user={user} token={token} /> : <LoginRegisterPage />;
+  const [showGuide, setShowGuide] = useState(false);
+  return user && token ? <Workspace key={user.id} user={user} token={token} /> : <>
+    <div className="guide-auth"><button className="secondary guide-trigger" onClick={() => setShowGuide(true)}>? Hướng dẫn</button></div>
+    <LoginRegisterPage />
+    {showGuide && <UserGuideModal close={() => setShowGuide(false)} />}
+  </>;
 }

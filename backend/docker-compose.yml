@@ -1,6 +1,8 @@
 services:
   mysql:
     image: mysql:8.0
+    mem_limit: 640m
+    command: ["--server-id=1", "--gtid-mode=ON", "--enforce-gtid-consistency=ON", "--binlog-expire-logs-seconds=604800", "--innodb-buffer-pool-size=128M"]
     restart: unless-stopped
     environment:
       MYSQL_DATABASE: dorm
@@ -16,6 +18,8 @@ services:
       retries: 24
   mongo:
     image: mongo:7
+    mem_limit: 512m
+    command: ["--wiredTigerCacheSizeGB", "0.25"]
     restart: unless-stopped
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?set MongoDB username}
@@ -29,6 +33,7 @@ services:
       retries: 24
   localstack:
     image: localstack/localstack:4.4.0
+    mem_limit: 768m
     restart: unless-stopped
     environment:
       SERVICES: s3
@@ -50,7 +55,39 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    mem_limit: 96m
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "volatile-lru", "--save", "", "--appendonly", "no"]
+    ports: ["127.0.0.1:6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 2s
+      retries: 5
+  mysql-replica:
+    image: mysql:8.0
+    profiles: ["ha"]
+    restart: unless-stopped
+    mem_limit: 640m
+    command: ["--server-id=2", "--gtid-mode=ON", "--enforce-gtid-consistency=ON", "--read-only=ON", "--replicate-wild-do-table=dorm.%", "--innodb-buffer-pool-size=128M"]
+    environment:
+      MYSQL_DATABASE: dorm
+      MYSQL_USER: dorm
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?copy .env.example to .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?copy .env.example to .env}
+    ports: ["127.0.0.1:3307:3306"]
+    volumes:
+      - mysql-replica-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysql -uroot -e 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
 volumes:
   mysql-data:
   mongo-data:
   localstack-data:
+  mysql-replica-data:

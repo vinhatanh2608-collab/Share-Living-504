@@ -6,3 +6,4 @@
 !app/**/*.py
 !scripts/
 !scripts/seed.py
+!scripts/backup_db.py

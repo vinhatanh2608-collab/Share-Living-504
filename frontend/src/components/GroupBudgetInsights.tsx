@@ -1,13 +1,13 @@
-﻿import { useState } from "react";
+import { useState } from "react";
 import { api } from "../lib/api";
 import { type Category, type Group, useAction, useResource, vnd } from "../lib/living";
 
-const labels: Record<Category, string> = {
+export const groupCategoryLabels: Record<Category, string> = {
   FOOD: "Ăn uống", TRANSPORT: "Đi lại", HOUSING: "Nhà ở", STUDY: "Học tập",
   ENTERTAINMENT: "Giải trí", OTHER: "Khác",
 };
 
-type Insights = {
+export type Insights = {
   period: string; current_month_spend: number; previous_month_spend: number; monthly_limit: number | null;
   usage_percent: number | null; status: "normal" | "warning" | "exceeded"; top_category: Category | null;
   summary: string;
@@ -29,7 +29,7 @@ export default function GroupBudgetInsights({ group, revision, reload }: {
       {error && <p className="error" role="alert">{error}</p>}
       {data && <div className="living-stack living-budget">
         <p>{data.summary}</p>
-        {data.top_category && <p>Chi nhiều nhất cho: {labels[data.top_category]}</p>}
+        {data.top_category && <p>Chi nhiều nhất cho: {groupCategoryLabels[data.top_category]}</p>}
         {data.monthly_limit !== null && <label>
           Đã chi {vnd(data.current_month_spend)} / {vnd(data.monthly_limit)} ({data.usage_percent}%)
           <progress max={data.monthly_limit} value={Math.min(data.current_month_spend, data.monthly_limit)} />

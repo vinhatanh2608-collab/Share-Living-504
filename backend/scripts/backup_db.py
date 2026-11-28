@@ -1,6 +1,8 @@
+import argparse
 import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+import gzip
 import json
 import logging
 import os
@@ -14,7 +16,8 @@ from dotenv import dotenv_values
 from sqlalchemy.engine import make_url
 
 BACKEND = Path(__file__).resolve().parents[1]
-BACKUPS = BACKEND.parent / "backups"
+BACKUPS = BACKEND / "backups"
+LEGACY_BACKUPS = BACKEND.parent / "backups"
 LOCAL = timezone(timedelta(hours=7))
 ARCHIVE = re.compile(r"shared_living_(\d{8}_\d{6})\.zip")
 logger = logging.getLogger(__name__)
@@ -69,12 +72,12 @@ def running_services():
 
 
 def mysql_dump(target, services, config):
-    options = ["--single-transaction", "--quick", "--no-tablespaces", "--set-gtid-purged=OFF"]
+    options = ["--single-transaction", "--routines", "--triggers", "--quick", "--no-tablespaces", "--set-gtid-purged=OFF"]
     if "mysql" in services:
-        script = 'MYSQL_PWD="$MYSQL_PASSWORD" exec mysqldump -u "$MYSQL_USER" "$@" -- "$MYSQL_DATABASE"'
+        script = 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysqldump -uroot "$@" -- "$MYSQL_DATABASE"'
         run_command(["docker", "compose", "exec", "-T", "mysql", "sh", "-c", script, "dump", *options], target)
     else:
-        url = make_url(config["MYSQL_URL"])
+        url = make_url(config.get("DATABASE_URL") or config["MYSQL_URL"])
         env = {**os.environ, "MYSQL_PWD": url.password or ""}
         run_command(["mysqldump", *options, "--host", url.host or "127.0.0.1", "--port",
                      str(url.port or 3306), "--user", url.username or "", "--", url.database], target, env)
@@ -83,6 +86,9 @@ def mysql_dump(target, services, config):
 def create_backup(directory=BACKUPS, *, daily=False):
     config = {**dotenv_values(BACKEND / ".env"), **os.environ}
     days = int(config.get("BACKUP_RETENTION_DAYS") or 14)
+    keep = int(config.get("BACKUP_KEEP_COUNT") or 14)
+    if keep < 1:
+        raise ValueError("BACKUP_KEEP_COUNT must be at least 1")
     if days < 1:
         raise ValueError("BACKUP_RETENTION_DAYS must be at least 1")
     directory.mkdir(parents=True, exist_ok=True)
@@ -100,15 +106,22 @@ def create_backup(directory=BACKUPS, *, daily=False):
             mysql = tmp / "mysql.sql"
             services = running_services()
             mysql_dump(mysql, services, config)
+            if not mysql.stat().st_size:
+                raise ValueError("Empty MySQL dump")
             with mysql.open("rb") as dump:
                 tables = sum(line.startswith(b"CREATE TABLE ") for line in dump)
             files = [mysql]
             if "mongo" in services:
-                mongo = tmp / "mongo.archive"
-                script = ('exec mongodump --archive --authenticationDatabase admin '
+                mongo = tmp / "mongo.archive.gz"
+                script = ('exec mongodump --archive --gzip --authenticationDatabase admin '
                           '--username "$MONGO_INITDB_ROOT_USERNAME" --password "$MONGO_INITDB_ROOT_PASSWORD" --db "$1"')
                 run_command(["docker", "compose", "exec", "-T", "mongo", "sh", "-c", script, "dump",
                              config.get("MONGO_DATABASE") or "dorm"], mongo)
+                if not mongo.stat().st_size:
+                    raise ValueError("Empty MongoDB dump")
+                with gzip.open(mongo, "rb") as stream:
+                    if not stream.read(1):
+                        raise ValueError("Empty uncompressed MongoDB dump")
                 files.append(mongo)
             manifest = {"timestamp": stamp.isoformat(), "table_counts": {"mysql": tables},
                         "mongo_status": "included" if len(files) > 1 else "skipped_not_running",
@@ -117,8 +130,13 @@ def create_backup(directory=BACKUPS, *, daily=False):
                 for file in files:
                     archive.write(file, file.name)
                 archive.writestr("backup_manifest.json", json.dumps(manifest, indent=2))
+            with ZipFile(tmp / name) as archive:
+                if archive.testzip() is not None:
+                    raise ValueError("ZIP integrity check failed")
             (tmp / name).replace(directory / name)
         prune(directory, now, days)
+        for item in archives(directory)[keep:]:
+            (directory / item["filename"]).unlink(missing_ok=True)
         return {"filename": name, "timestamp": stamp.isoformat(), "size": (directory / name).stat().st_size}
 
 
@@ -131,8 +149,58 @@ async def backup_forever():
         await asyncio.sleep(300)
 
 
-if __name__ == "__main__":
+def restore_backup(path):
+    config = {**dotenv_values(BACKEND / ".env"), **os.environ}
+    with ZipFile(path) as archive, TemporaryDirectory() as scratch:
+        if archive.testzip() is not None:
+            raise ValueError("ZIP integrity check failed")
+        members = archive.namelist()
+        mongo_names = [name for name in ("mongo.archive.gz", "mongo.archive") if name in members]
+        if members.count("mysql.sql") != 1 or len(mongo_names) > 1:
+            raise ValueError("Unexpected backup entries")
+        services = running_services()
+        if "mysql" not in services or (mongo_names and "mongo" not in services):
+            raise ValueError("Start all destination database services before restoring")
+        for name in ["mysql.sql", *mongo_names]:
+            if members.count(name) != 1 or not archive.getinfo(name).file_size:
+                raise ValueError("Missing or empty dump")
+            archive.extract(name, scratch)
+        with (Path(scratch) / "mysql.sql").open("rb") as sql:
+            subprocess.run(["docker", "compose", "exec", "-T", "mysql", "sh", "-c",
+                'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot -- "$MYSQL_DATABASE"'],
+                cwd=BACKEND, stdin=sql, check=True, timeout=600)
+        if mongo_names:
+            name = mongo_names[0]
+            with (Path(scratch) / name).open("rb") as mongo:
+                script = ('exec mongorestore --archive --drop --stopOnError --authenticationDatabase admin '
+                          '--username "$MONGO_INITDB_ROOT_USERNAME" --password "$MONGO_INITDB_ROOT_PASSWORD" '
+                          '--nsInclude "$1" "$@"')
+                flags = ["--gzip"] if name.endswith(".gz") else []
+                subprocess.run(["docker", "compose", "exec", "-T", "mongo", "sh", "-c", script, "restore",
+                    (config.get("MONGO_DATABASE") or "dorm") + ".*", *flags], cwd=BACKEND, stdin=mongo,
+                    check=True, timeout=600)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--daily", action="store_true")
+    mode.add_argument("--restore", type=Path)
+    parser.add_argument("--confirm-replace", action="store_true")
+    args = parser.parse_args()
     try:
-        print(json.dumps(create_backup()))
+        if args.restore:
+            if not args.confirm_replace:
+                parser.error("Restore replaces existing data. Stop the API and pass --confirm-replace.")
+            BACKUPS.mkdir(parents=True, exist_ok=True)
+            with backup_lock(BACKUPS):
+                restore_backup(args.restore.resolve())
+            print("Database restore finished.")
+        else:
+            print(json.dumps(create_backup(daily=args.daily)))
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
-        raise SystemExit(f"Backup failed ({type(exc).__name__}). Check Docker and database configuration.") from None
+        raise SystemExit(f"Database backup operation failed ({type(exc).__name__}).") from None
+
+
+if __name__ == "__main__":
+    main()

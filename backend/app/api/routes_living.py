@@ -2,14 +2,16 @@ import asyncio
 from datetime import date, datetime, timedelta, timezone
 from secrets import token_hex
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
+from ..models.archive import PersonalHistory, personal_archive
 from sqlalchemy.exc import IntegrityError
 
 from .deps import Actor
 from ..core.security import passwords
 from ..models.living import Budget, GroupMember, LivingGroup, PersonalTransaction
 from ..models.mysql_models import User
+from ..services.cache_service import cached
 from ..schemas.living import BankInfo, BudgetIn, GroupIn, JoinIn, MemberDecision, Register, TransactionIn
 
 router = APIRouter(tags=["living"])
@@ -59,10 +61,11 @@ async def register(data: Register, request: Request):
 
 
 @router.get("/groups")
-async def groups(request: Request, actor: Actor):
+async def groups(request: Request, actor: Actor, limit: int = Query(500, ge=1, le=500),
+                 after: int = Query(0, ge=0)):
     async with request.app.state.resources.sql() as sql:
         rows = await sql.execute(select(LivingGroup, GroupMember).join(GroupMember)
-                                 .where(GroupMember.user_id == actor.id).order_by(LivingGroup.id))
+                                 .where(GroupMember.user_id == actor.id, LivingGroup.id > after).order_by(LivingGroup.id).limit(limit))
         return [group_view(group, member) for group, member in rows]
 
 
@@ -93,16 +96,24 @@ async def join(data: JoinIn, request: Request, actor: Actor):
 
 
 @router.get("/groups/{group_id}/members")
-async def members(group_id: int, request: Request, actor: Actor):
-    async with request.app.state.resources.sql() as sql:
+async def members(group_id: int, request: Request, actor: Actor, limit: int = Query(500, ge=1, le=500),
+                  offset: int = Query(0, ge=0, le=100000)):
+    resources = request.app.state.resources
+    async with resources.sql() as sql:
         await approved_member(sql, group_id, actor.id)
         group = await sql.get(LivingGroup, group_id)
-        query = select(GroupMember, User).join(User).where(GroupMember.group_id == group_id, User.active.is_(True))
-        if group.owner_id != actor.id:
-            query = query.where(GroupMember.status == "APPROVED")
-        rows = await sql.execute(query.order_by(User.name))
-        return [{"id": user.id, "name": user.name, "status": member.status,
-                 "qr": qr(member) if member.status == "APPROVED" else None} for member, user in rows]
+        owner = group.owner_id == actor.id
+
+    async def load():
+        async with resources.sql() as sql:
+            query = select(GroupMember, User).join(User).where(GroupMember.group_id == group_id, User.active.is_(True))
+            if not owner:
+                query = query.where(GroupMember.status == "APPROVED")
+            rows = await sql.execute(query.order_by(User.name, User.id).offset(offset).limit(limit))
+            return [{"id": user.id, "name": user.name, "status": member.status,
+                     "qr": qr(member) if member.status == "APPROVED" else None} for member, user in rows]
+
+    return await cached(request, ["members", group_id, owner, limit, offset], load)
 
 
 @router.patch("/groups/{group_id}/members/{user_id}")
@@ -133,11 +144,12 @@ async def set_bank(data: BankInfo, request: Request, actor: Actor):
 
 
 @router.get("/users/me/bank-info")
-async def get_bank(actor: Actor):
-    if not actor.bank_bin:
-        return None
-    return BankInfo(bank_bin=actor.bank_bin, bank_account_no=actor.account_number,
-                    bank_account_name=actor.account_name)
+async def get_bank(request: Request, actor: Actor):
+    async def load():
+        return BankInfo(bank_bin=actor.bank_bin, bank_account_no=actor.account_number,
+                        bank_account_name=actor.account_name) if actor.bank_bin else None
+
+    return await cached(request, ["bank", actor.id, actor.bank_bin, actor.account_number, actor.account_name], load)
 
 
 @router.put("/groups/{group_id}/members/me/qr")
@@ -156,10 +168,10 @@ def transaction_view(entry):
 @router.get("/personal-expenses")
 async def transactions(request: Request, actor: Actor, before: int | None = None):
     async with request.app.state.resources.sql() as sql:
-        query = select(PersonalTransaction).where(PersonalTransaction.user_id == actor.id)
+        query = select(PersonalHistory).where(PersonalHistory.user_id == actor.id)
         if before is not None:
-            query = query.where(PersonalTransaction.id < before)
-        rows = await sql.scalars(query.order_by(PersonalTransaction.id.desc()).limit(100))
+            query = query.where(PersonalHistory.id < before)
+        rows = await sql.scalars(query.order_by(PersonalHistory.id.desc()).limit(100))
         return [transaction_view(row) for row in rows]
 
 
@@ -176,7 +188,16 @@ async def add_transaction(data: TransactionIn, request: Request, actor: Actor):
 async def replace_transaction(entry_id: int, data: TransactionIn, request: Request, actor: Actor):
     async with request.app.state.resources.sql.begin() as sql:
         entry = await sql.get(PersonalTransaction, entry_id, with_for_update=True)
-        if not entry or entry.user_id != actor.id:
+        if entry is None:
+            query = personal_archive.update().where(personal_archive.c.id == entry_id,
+                personal_archive.c.user_id == actor.id).values(**data.model_dump())
+            existing = await sql.scalar(select(personal_archive.c.id).where(
+                personal_archive.c.id == entry_id, personal_archive.c.user_id == actor.id).with_for_update())
+            if existing is None:
+                raise HTTPException(404, "Transaction not found")
+            await sql.execute(query)
+            return {"id": entry_id, **data.model_dump()}
+        if entry.user_id != actor.id:
             raise HTTPException(404, "Transaction not found")
         for key, value in data.model_dump().items():
             setattr(entry, key, value)
@@ -187,7 +208,13 @@ async def replace_transaction(entry_id: int, data: TransactionIn, request: Reque
 async def remove_transaction(entry_id: int, request: Request, actor: Actor):
     async with request.app.state.resources.sql.begin() as sql:
         entry = await sql.get(PersonalTransaction, entry_id, with_for_update=True)
-        if not entry or entry.user_id != actor.id:
+        if entry is None:
+            deleted = await sql.execute(personal_archive.delete().where(personal_archive.c.id == entry_id,
+                personal_archive.c.user_id == actor.id))
+            if not deleted.rowcount:
+                raise HTTPException(404, "Transaction not found")
+            return
+        if entry.user_id != actor.id:
             raise HTTPException(404, "Transaction not found")
         await sql.delete(entry)
 

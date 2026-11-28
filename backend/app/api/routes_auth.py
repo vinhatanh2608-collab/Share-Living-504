@@ -1,9 +1,10 @@
 import asyncio
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 from ..core.security import issue, passwords
 from ..models.mysql_models import User
 from ..schemas.auth import Login, Token, Profile, VietQR
+from ..services.cache_service import cached
 from .deps import Actor, is_owner
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -25,7 +26,12 @@ async def login(data: Login, request: Request):
 
 @router.get("/me")
 async def me(request: Request, actor: Actor):
-    return {**Profile.model_validate(actor).model_dump(), "is_owner": request.app.state.legacy_room and is_owner(actor)}
+    owner = request.app.state.legacy_room and is_owner(actor)
+
+    async def load():
+        return {**Profile.model_validate(actor).model_dump(), "is_owner": owner}
+
+    return await cached(request, ["profile", actor.id, actor.name, actor.username, owner], load)
 
 
 @legacy_router.put("/me/vietqr")
@@ -38,9 +44,10 @@ async def update_bank(data: VietQR, request: Request, actor: Actor):
 
 
 @legacy_router.get("/roommates")
-async def roommates(request: Request, actor: Actor):
+async def roommates(request: Request, actor: Actor, limit: int = Query(500, ge=1, le=500),
+                    after: int = Query(0, ge=0)):
     async with request.app.state.resources.sql() as sql:
-        users = await sql.scalars(select(User).where(User.active.is_(True)).order_by(User.id))
+        users = await sql.scalars(select(User).where(User.active.is_(True), User.id > after).order_by(User.id).limit(limit))
         return [{**Profile.model_validate(user).model_dump(),
                  "vietqr": (VietQR.model_validate(user, from_attributes=True)
                             if user.bank_bin else None)} for user in users]

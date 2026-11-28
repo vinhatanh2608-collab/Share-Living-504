@@ -40,6 +40,7 @@ class GroupMember(Base):
 
 class PersonalTransaction(Base):
     __tablename__ = "personal_expenses"
+    __table_args__ = {"sqlite_autoincrement": True}
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     type: Mapped[str] = mapped_column(String(7))
@@ -59,7 +60,7 @@ class Budget(Base):
 
 class GroupExpense(Base):
     __tablename__ = "group_expenses"
-    __table_args__ = (UniqueConstraint("group_id", "creditor_id", "request_id"),)
+    __table_args__ = (UniqueConstraint("group_id", "creditor_id", "request_id"), {"sqlite_autoincrement": True})
     id: Mapped[int] = mapped_column(primary_key=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("living_groups.id"), index=True)
     creditor_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
@@ -99,7 +100,7 @@ class GroupProof(Base):
 
 class DebtSplit(Base):
     __tablename__ = "debt_splits"
-    __table_args__ = (UniqueConstraint("expense_id", "debtor_id"),)
+    __table_args__ = (UniqueConstraint("expense_id", "debtor_id"), {"sqlite_autoincrement": True})
     id: Mapped[int] = mapped_column(primary_key=True)
     expense_id: Mapped[int] = mapped_column(ForeignKey("group_expenses.id"))
     debtor_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
@@ -184,3 +185,16 @@ class GroupBudgetLimit(Base):
     __tablename__ = "group_budget_limits"
     group_id: Mapped[int] = mapped_column(ForeignKey("living_groups.id"), primary_key=True)
     monthly_limit: Mapped[int] = mapped_column(BigInteger)
+
+
+PERFORMANCE_INDEXES += (
+    Index("ix_personal_user_category_spent", PersonalTransaction.user_id, PersonalTransaction.category,
+          PersonalTransaction.spent_at),
+    Index("ix_personal_archive_cutoff", PersonalTransaction.spent_at, PersonalTransaction.id),
+    Index("ix_group_expense_group_created", GroupExpense.group_id, GroupExpense.created_at, GroupExpense.id),
+    Index("ix_group_expense_archive_cutoff", GroupExpense.created_at, GroupExpense.id),
+    Index("ix_group_proof_group_status_created", GroupProof.group_id, GroupProof.status, GroupProof.created_at),
+    Index("ix_group_proof_debtor_status", GroupProof.debtor_id, GroupProof.status),
+    Index("ix_group_proof_creditor_status", GroupProof.creditor_id, GroupProof.status),
+    Index("ix_group_debt_debtor_status", DebtSplit.debtor_id, DebtSplit.status),
+)

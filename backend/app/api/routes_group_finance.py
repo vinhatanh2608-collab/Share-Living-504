@@ -1,14 +1,16 @@
 from datetime import timedelta
 from hashlib import sha256
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import case, delete, func, select
 
 from .deps import Actor
 from .routes_living import approved_member, qr
+from ..models.archive import DebtHistory, GroupHistory, ParticipantHistory, group_archive
 from ..models.living import DebtSplit, ExpenseParticipant, GroupEvent, GroupExpense, GroupMember, GroupProof, GroupReminder, ReminderCooldown, LivingGroup
 from ..models.mysql_models import now
 from ..schemas.living import GROUP_PROOF_MAX_BYTES, DebtSelection, GroupExpenseIn, GroupExpenseUpdate, ReceiptIn, ReceiptSubmit, ReceiptUpload, ReminderTransfer, VerifyIn
+from ..services.cache_service import cached
 from ..services.expense_participation import resolve_participants
 from ..services.debt_simplifier import simplify_group
 from ..services.storage_service import PROOF_IMAGE_TYPES, download, finalize, upload_ticket
@@ -68,6 +70,13 @@ async def save_expense(sql, group_id, actor_id, data):
         if prior.request_hash != fingerprint:
             raise HTTPException(409, "Request ID already used for a different expense")
         return {"id": prior.id}
+    archived = (await sql.execute(select(group_archive.c.id, group_archive.c.request_hash).where(
+        group_archive.c.group_id == group_id, group_archive.c.creditor_id == actor_id,
+        group_archive.c.request_id == str(data.request_id)))).first()
+    if archived:
+        if archived.request_hash != fingerprint:
+            raise HTTPException(409, "Request ID already used for a different expense")
+        return {"id": archived.id}
     if data.funded_by_pool and await fund_balance(sql, group_id) < data.amount:
         raise HTTPException(409, "S? d? qu? chung kh?ng ??.")
     if data.template_id is not None:
@@ -98,6 +107,10 @@ async def update_expense(group_id: int, expense_id: int, data: GroupExpenseUpdat
         expense = await sql.scalar(select(GroupExpense).where(GroupExpense.id == expense_id,
             GroupExpense.group_id == group_id, GroupExpense.creditor_id == actor.id).with_for_update())
         if not expense:
+            archived = await sql.scalar(select(group_archive.c.id).where(group_archive.c.id == expense_id,
+                group_archive.c.group_id == group_id, group_archive.c.creditor_id == actor.id))
+            if archived:
+                raise HTTPException(409, "An expense with a submitted payment cannot be changed")
             raise HTTPException(404, "Expense unavailable")
         if await sql.scalar(select(GroupFundTransaction.id).where(GroupFundTransaction.expense_id == expense.id)):
             raise HTTPException(409, "Kh?ng th? s?a kho?n chi ?? tr?ch t? qu?.")
@@ -119,23 +132,23 @@ async def update_expense(group_id: int, expense_id: int, data: GroupExpenseUpdat
 async def expenses(group_id: int, request: Request, actor: Actor, before: int | None = None):
     async with request.app.state.resources.sql() as sql:
         await approved_member(sql, group_id, actor.id)
-        query = select(GroupExpense).where(GroupExpense.group_id == group_id)
+        query = select(GroupHistory).where(GroupHistory.group_id == group_id)
         if before is not None:
-            query = query.where(GroupExpense.id < before)
-        rows = (await sql.scalars(query.order_by(GroupExpense.id.desc()).limit(100))).all()
+            query = query.where(GroupHistory.id < before)
+        rows = (await sql.scalars(query.order_by(GroupHistory.id.desc()).limit(100))).all()
         if not rows:
             return []
         pool_expense_ids = set(await sql.scalars(select(GroupFundTransaction.expense_id).where(
             GroupFundTransaction.group_id == group_id, GroupFundTransaction.expense_id.in_([row.id for row in rows]))))
         shares = {row.id: ([{"user_id": row.creditor_id, "amount": row.payer_share}]
                            if row.payer_share else []) for row in rows}
-        splits = await sql.scalars(select(DebtSplit).where(
-            DebtSplit.expense_id.in_(shares.keys())).order_by(DebtSplit.debtor_id))
+        splits = await sql.scalars(select(DebtHistory).where(
+            DebtHistory.expense_id.in_(shares.keys())).order_by(DebtHistory.debtor_id))
         for split in splits:
             shares[split.expense_id].append({"user_id": split.debtor_id, "amount": split.amount})
         participants = {row.id: [] for row in rows}
-        entries = await sql.scalars(select(ExpenseParticipant).where(
-            ExpenseParticipant.expense_id.in_(participants)).order_by(ExpenseParticipant.user_id))
+        entries = await sql.scalars(select(ParticipantHistory).where(
+            ParticipantHistory.expense_id.in_(participants)).order_by(ParticipantHistory.user_id))
         for entry in entries:
             participants[entry.expense_id].append({"user_id": entry.user_id, "status": entry.status,
                 "paid_amount": entry.paid_amount, "share_amount": entry.share_amount,
@@ -165,10 +178,10 @@ def debt_query(group_id):
 async def debts(group_id: int, request: Request, actor: Actor, before: int | None = None):
     async with request.app.state.resources.sql() as sql:
         await approved_member(sql, group_id, actor.id)
-        query = debt_query(group_id).where((DebtSplit.debtor_id == actor.id) | (GroupExpense.creditor_id == actor.id))
+        query = select(DebtHistory, GroupHistory).join(GroupHistory, DebtHistory.expense_id == GroupHistory.id).where(GroupHistory.group_id == group_id).where((DebtHistory.debtor_id == actor.id) | (GroupHistory.creditor_id == actor.id))
         if before is not None:
-            query = query.where(DebtSplit.id < before)
-        rows = await sql.execute(query.order_by(DebtSplit.id.desc()).limit(100))
+            query = query.where(DebtHistory.id < before)
+        rows = await sql.execute(query.order_by(DebtHistory.id.desc()).limit(100))
         cutoff = now() - timedelta(days=3)
         return [{"id": debt.id, "title": expense.title, "amount": debt.amount, "status": debt.status,
                  "debtor_id": debt.debtor_id, "creditor_id": expense.creditor_id, "proof_id": debt.proof_id,
@@ -177,27 +190,33 @@ async def debts(group_id: int, request: Request, actor: Actor, before: int | Non
 
 @router.get("/debts/summary")
 async def debt_summary(group_id: int, request: Request, actor: Actor):
-    async with request.app.state.resources.sql() as sql:
+    resources = request.app.state.resources
+    async with resources.sql() as sql:
         await approved_member(sql, group_id, actor.id)
-        shared_funding = await sql.scalar(select(ExpenseParticipant.expense_id).join(GroupExpense).where(
-            GroupExpense.group_id == group_id, ExpenseParticipant.paid_amount > 0,
-            ExpenseParticipant.user_id != GroupExpense.creditor_id).limit(1))
-        cross_payment = await sql.scalar(select(GroupProof.id).where(GroupProof.group_id == group_id,
-            GroupProof.transfer_amount.is_not(None), GroupProof.status.in_(("PENDING", "PAID"))).limit(1))
-        if shared_funding or cross_payment:
-            ledger = await simplify_group(sql, group_id)
-            balance = next(item["net_balance"] for item in ledger["member_breakdown"] if item["user_id"] == actor.id)
-            return {"owed": max(-balance, 0), "receivable": max(balance, 0)}
-        debtor = DebtSplit.debtor_id == actor.id
-        creditor = GroupExpense.creditor_id == actor.id
-        owed, receivable = (await sql.execute(select(
-            func.sum(case((debtor, DebtSplit.amount), else_=0)),
-            func.sum(case((creditor, DebtSplit.amount), else_=0)),
-        ).select_from(DebtSplit).join(GroupExpense).where(
-            GroupExpense.group_id == group_id, DebtSplit.status != "PAID", debtor | creditor
-        ))).one()
-        return {"owed": int(owed or 0), "receivable": int(receivable or 0)}
 
+    async def load():
+        async with resources.sql() as sql:
+            shared_funding = await sql.scalar(select(ExpenseParticipant.expense_id).join(GroupExpense).where(
+                GroupExpense.group_id == group_id, ExpenseParticipant.paid_amount > 0,
+                ExpenseParticipant.user_id != GroupExpense.creditor_id).limit(1))
+            cross_payment = await sql.scalar(select(GroupProof.id).where(GroupProof.group_id == group_id,
+                GroupProof.transfer_amount.is_not(None), GroupProof.status.in_(("PENDING", "PAID"))).limit(1))
+            if shared_funding or cross_payment:
+                ledger = await simplify_group(sql, group_id)
+                balance = next(item["net_balance"] for item in ledger["member_breakdown"] if item["user_id"] == actor.id)
+                return {"owed": max(-balance, 0), "receivable": max(balance, 0)}
+            debtor = DebtSplit.debtor_id == actor.id
+            creditor = GroupExpense.creditor_id == actor.id
+            owed, receivable = (await sql.execute(select(
+                func.sum(case((debtor, DebtSplit.amount), else_=0)),
+                func.sum(case((creditor, DebtSplit.amount), else_=0)),
+            ).select_from(DebtSplit).join(GroupExpense).where(
+                GroupExpense.group_id == group_id, DebtSplit.status != "PAID", debtor | creditor
+            ))).one()
+            return {"owed": int(owed or 0), "receivable": int(receivable or 0)}
+
+
+    return await cached(request, ["debt-summary", group_id, actor.id], load)
 
 async def payable(sql, group_id, actor_id, ids, lock=False):
     if len(set(ids)) != len(ids):
@@ -214,9 +233,15 @@ async def payable(sql, group_id, actor_id, ids, lock=False):
 
 @router.get("/debts/simplified")
 async def simplified(group_id: int, request: Request, actor: Actor):
-    async with request.app.state.resources.sql() as sql:
+    resources = request.app.state.resources
+    async with resources.sql() as sql:
         await approved_member(sql, group_id, actor.id)
-        return await simplify_group(sql, group_id)
+
+    async def load():
+        async with resources.sql() as sql:
+            return await simplify_group(sql, group_id)
+
+    return await cached(request, ["simplified", group_id], load)
 
 
 async def payment_selection(sql, group_id, actor_id, data, lock=False):
@@ -410,19 +435,24 @@ async def scoped_template(sql, group_id, template_id):
 
 
 @router.get("/expense-templates")
-async def list_templates(group_id: int, request: Request, actor: Actor):
+async def list_templates(group_id: int, request: Request, actor: Actor,
+                         limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0, le=100000)):
     async with request.app.state.resources.sql() as sql:
         await approved_member(sql, group_id, actor.id)
         return (await sql.scalars(select(GroupExpenseTemplate).where(
-            GroupExpenseTemplate.group_id == group_id).order_by(GroupExpenseTemplate.title))).all()
+            GroupExpenseTemplate.group_id == group_id).order_by(GroupExpenseTemplate.title, GroupExpenseTemplate.id).limit(limit).offset(offset))).all()
 
 
 @router.post("/expense-templates", status_code=201)
 async def create_template(group_id: int, data: ExpenseTemplateIn, request: Request, actor: Actor):
     async with request.app.state.resources.sql.begin() as sql:
         await lock_group(sql, group_id, actor.id)
-        for user_id in set(data.participants_preset_json):
-            await approved_member(sql, group_id, user_id)
+        preset = set(data.participants_preset_json)
+        if preset:
+            approved = set(await sql.scalars(select(GroupMember.user_id).where(
+                GroupMember.group_id == group_id, GroupMember.status == "APPROVED", GroupMember.user_id.in_(preset))))
+            if preset != approved:
+                raise HTTPException(404, "Group unavailable")
         row = GroupExpenseTemplate(group_id=group_id, **data.model_dump())
         sql.add(row)
         await sql.flush()

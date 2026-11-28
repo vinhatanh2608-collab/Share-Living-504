@@ -16,7 +16,9 @@ from scripts import backup_db
 from .deps import Actor, is_owner
 from .routes_living import approved_member
 from .routes_group_finance import fund_balance
-from ..models.living import GroupExpense, GroupFundTransaction, LivingGroup
+from ..core.database import read_query
+from ..models.archive import GroupHistory
+from ..models.living import GroupFundTransaction, LivingGroup
 from ..models.mysql_models import User
 from ..services.debt_simplifier import simplify_group
 from ..services.monthly_reminders import LOCAL, project_monthly, queue_month
@@ -66,15 +68,21 @@ async def export_report(group_id: int, request: Request, actor: Actor,
     except (ValueError, OverflowError):
         raise HTTPException(422, "Tháng báo cáo không hợp lệ.") from None
     first, cutoff = [value.astimezone(timezone.utc).replace(tzinfo=None) for value in (start, end)]
-    async with request.app.state.resources.sql() as sql:
+    resources = request.app.state.resources
+    async with resources.sql() as sql:
         await approved_member(sql, group_id, actor.id)
-        rows = (await sql.execute(select(GroupExpense, User.name, GroupFundTransaction.id)
-            .join(User, User.id == GroupExpense.creditor_id)
-            .outerjoin(GroupFundTransaction, GroupFundTransaction.expense_id == GroupExpense.id)
-            .where(GroupExpense.group_id == group_id, GroupExpense.created_at >= first,
-                   GroupExpense.created_at < cutoff).order_by(GroupExpense.created_at, GroupExpense.id))).all()
+
+    async def query(sql):
+        rows = (await sql.execute(select(GroupHistory, User.name, GroupFundTransaction.id)
+            .join(User, User.id == GroupHistory.creditor_id)
+            .outerjoin(GroupFundTransaction, GroupFundTransaction.expense_id == GroupHistory.id)
+            .where(GroupHistory.group_id == group_id, GroupHistory.created_at >= first,
+                   GroupHistory.created_at < cutoff).order_by(GroupHistory.created_at, GroupHistory.id))).all()
         balance = await fund_balance(sql, group_id, cutoff)
         settlement = await simplify_group(sql, group_id, period_bounds=(first, cutoff))
+        return rows, balance, settlement
+
+    rows, balance, settlement = await read_query(resources, query)
     names = {row["user_id"]: row["name"] for row in settlement["member_breakdown"]}
     transfers = settlement["transfers"]
     sections = {
@@ -125,7 +133,11 @@ async def export_report(group_id: int, request: Request, actor: Actor,
 async def list_backups(actor: Actor):
     if not is_owner(actor):
         raise HTTPException(403, "Server owner required")
-    return await asyncio.to_thread(backup_db.archives)
+    def all_backups():
+        return sorted(backup_db.archives() + backup_db.archives(backup_db.LEGACY_BACKUPS),
+                      key=lambda row: row["timestamp"], reverse=True)
+
+    return await asyncio.to_thread(all_backups)
 
 
 @router.post("/system/backups/run", status_code=201)

@@ -4,15 +4,17 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select, union_all
 
 from .deps import Actor
 from .routes_group_finance import lock_group
 from .routes_living import approved_member, today_local
-from ..models.living import GroupBudgetLimit, LivingGroup, Budget, DebtSplit, ExpenseParticipant, GroupExpense, GroupMember, PersonalTransaction
+from ..core.database import read_query
+from ..services.cache_service import cached
+from ..models.archive import DebtHistory, GroupHistory, ParticipantHistory, PersonalHistory
+from ..models.living import GroupBudgetLimit, LivingGroup, Budget, DebtSplit, GroupExpense, GroupFundTransaction, GroupMember, GroupProof
 from ..models.mysql_models import now
 from ..services.advisor import provider_reply
-from ..services.debt_simplifier import simplify_group
 
 router = APIRouter(tags=["analytics and advisor"])
 LOCAL = timezone(timedelta(hours=7))
@@ -22,7 +24,7 @@ def utc_start(day):
     return datetime.combine(day, time.min, LOCAL).astimezone(timezone.utc).replace(tzinfo=None)
 
 
-async def summarize(sql, user_id, period, scope, *, include_personal_categories=False):
+async def summarize(sql, user_id, period, scope, *, include_personal_categories=False, group_ids=None):
     today = today_local()
     month = today.replace(day=1)
     start = {"week": today - timedelta(days=6), "month": month, "year": date(today.year, 1, 1)}[period]
@@ -34,11 +36,11 @@ async def summarize(sql, user_id, period, scope, *, include_personal_categories=
         return day.strftime("%Y-%m") if period == "year" else day.isoformat()
 
     if scope != "group":
-        entries = await sql.execute(select(PersonalTransaction.type, PersonalTransaction.category,
-            PersonalTransaction.spent_at, func.sum(PersonalTransaction.amount)).where(
-                PersonalTransaction.user_id == user_id, PersonalTransaction.spent_at >= start,
-                PersonalTransaction.spent_at < end).group_by(PersonalTransaction.type,
-                PersonalTransaction.category, PersonalTransaction.spent_at))
+        entries = await sql.execute(select(PersonalHistory.type, PersonalHistory.category,
+            PersonalHistory.spent_at, func.sum(PersonalHistory.amount)).where(
+                PersonalHistory.user_id == user_id, PersonalHistory.spent_at >= start,
+                PersonalHistory.spent_at < end).group_by(PersonalHistory.type,
+                PersonalHistory.category, PersonalHistory.spent_at))
         for kind, category, day, amount in entries:
             if kind == "INCOME":
                 income += int(amount)
@@ -51,16 +53,18 @@ async def summarize(sql, user_id, period, scope, *, include_personal_categories=
 
     categories = defaultdict(int, personal_categories)
     membership = select(GroupMember.group_id).where(GroupMember.user_id == user_id, GroupMember.status == "APPROVED")
-    group_window = (GroupExpense.group_id.in_(membership), GroupExpense.created_at >= utc_start(start),
-                    GroupExpense.created_at < utc_start(end))
+    if group_ids is not None:
+        membership = group_ids
+    group_window = (GroupHistory.group_id.in_(membership), GroupHistory.created_at >= utc_start(start),
+                    GroupHistory.created_at < utc_start(end))
     if scope != "personal":
-        historical = ~select(ExpenseParticipant.user_id).where(ExpenseParticipant.expense_id == GroupExpense.id).exists()
-        payer = select(GroupExpense.category, GroupExpense.created_at, GroupExpense.payer_share).where(
-            *group_window, historical, GroupExpense.creditor_id == user_id)
-        debtor = select(GroupExpense.category, GroupExpense.created_at, DebtSplit.amount).join(DebtSplit).where(
-            *group_window, historical, DebtSplit.debtor_id == user_id)
-        allocated = select(GroupExpense.category, GroupExpense.created_at, ExpenseParticipant.share_amount).join(
-            ExpenseParticipant).where(*group_window, ExpenseParticipant.user_id == user_id, ExpenseParticipant.share_amount > 0)
+        historical = ~select(ParticipantHistory.user_id).where(ParticipantHistory.expense_id == GroupHistory.id).exists()
+        payer = select(GroupHistory.category, GroupHistory.created_at, GroupHistory.payer_share).where(
+            *group_window, historical, GroupHistory.creditor_id == user_id)
+        debtor = select(GroupHistory.category, GroupHistory.created_at, DebtHistory.amount).select_from(GroupHistory).join(DebtHistory, DebtHistory.expense_id == GroupHistory.id).where(
+            *group_window, historical, DebtHistory.debtor_id == user_id)
+        allocated = select(GroupHistory.category, GroupHistory.created_at, ParticipantHistory.share_amount).select_from(GroupHistory).join(
+            ParticipantHistory, ParticipantHistory.expense_id == GroupHistory.id).where(*group_window, ParticipantHistory.user_id == user_id, ParticipantHistory.share_amount > 0)
         for category, timestamp, amount in await sql.execute(payer.union_all(debtor, allocated)):
             group += amount
             categories[category] += amount
@@ -74,9 +78,31 @@ async def summarize(sql, user_id, period, scope, *, include_personal_categories=
         aged = dict((await sql.execute(select(GroupExpense.group_id, func.sum(DebtSplit.amount))
                     .select_from(DebtSplit).join(GroupExpense).where(GroupExpense.group_id.in_(membership),
                     overdue_debt).group_by(GroupExpense.group_id))).all())
-        for group_id in await sql.scalars(membership):
-            balances = await simplify_group(sql, group_id)
-            net = next(row["net_balance"] for row in balances["member_breakdown"] if row["user_id"] == user_id)
+        # Approved scopes come from primary. Sum each source by group before computing personal debt totals.
+        personal_group = (GroupHistory.group_id.in_(membership),
+            ~select(GroupFundTransaction.id).where(GroupFundTransaction.expense_id == GroupHistory.id).exists())
+        legacy = ~select(ParticipantHistory.expense_id).where(
+            ParticipantHistory.expense_id == GroupHistory.id).exists()
+        contributions = select(GroupHistory.group_id, (ParticipantHistory.paid_amount -
+            ParticipantHistory.share_amount).label("net")).select_from(GroupHistory).join(
+            ParticipantHistory, ParticipantHistory.expense_id == GroupHistory.id).where(
+            *personal_group, ParticipantHistory.user_id == user_id)
+        legacy_credit = select(GroupHistory.group_id, (GroupHistory.amount - GroupHistory.payer_share).label("net")).where(
+            *personal_group, legacy, GroupHistory.creditor_id == user_id)
+        legacy_debt = select(GroupHistory.group_id, (-DebtHistory.amount).label("net")).select_from(DebtHistory).join(
+            GroupHistory, DebtHistory.expense_id == GroupHistory.id).where(
+                *personal_group, legacy, DebtHistory.debtor_id == user_id)
+        settled = select(GroupHistory.group_id, case((DebtHistory.debtor_id == user_id, DebtHistory.amount), else_=-DebtHistory.amount).label("net")
+            ).select_from(DebtHistory).join(GroupHistory, DebtHistory.expense_id == GroupHistory.id).where(
+                *personal_group, DebtHistory.status == "PAID",
+                (DebtHistory.debtor_id == user_id) | (GroupHistory.creditor_id == user_id))
+        transfers = select(GroupProof.group_id, case((GroupProof.debtor_id == user_id, GroupProof.transfer_amount),
+            else_=-GroupProof.transfer_amount).label("net")).where(GroupProof.group_id.in_(membership),
+                GroupProof.status == "PAID", GroupProof.transfer_amount.is_not(None),
+                (GroupProof.debtor_id == user_id) | (GroupProof.creditor_id == user_id))
+        deltas = union_all(contributions, legacy_credit, legacy_debt, settled, transfers).subquery()
+        for group_id, total in await sql.execute(select(deltas.c.group_id, func.sum(deltas.c.net)).group_by(deltas.c.group_id)):
+            net = int(total)
             owing += max(-net, 0)
             owed += max(net, 0)
             overdue += min(max(-net, 0), int(aged.get(group_id, 0)))
@@ -91,10 +117,10 @@ async def summarize(sql, user_id, period, scope, *, include_personal_categories=
             if row.month == month:
                 budgets.append(row)
         if budgets and start > month:
-            spending_rows = await sql.execute(select(PersonalTransaction.category, func.sum(PersonalTransaction.amount))
-                .where(PersonalTransaction.user_id == user_id, PersonalTransaction.type == "EXPENSE",
-                       PersonalTransaction.spent_at >= month, PersonalTransaction.spent_at < end)
-                .group_by(PersonalTransaction.category))
+            spending_rows = await sql.execute(select(PersonalHistory.category, func.sum(PersonalHistory.amount))
+                .where(PersonalHistory.user_id == user_id, PersonalHistory.type == "EXPENSE",
+                       PersonalHistory.spent_at >= month, PersonalHistory.spent_at < end)
+                .group_by(PersonalHistory.category))
             monthly_spend = dict(spending_rows.all())
     budget_trend = {}
     for offset in range((end - start).days):
@@ -122,8 +148,16 @@ async def summarize(sql, user_id, period, scope, *, include_personal_categories=
 @router.get("/analytics/summary")
 async def summary(request: Request, actor: Actor, period: Literal["week", "month", "year"] = "month",
                   scope: Literal["personal", "group", "combined"] = "combined"):
-    async with request.app.state.resources.sql() as sql:
-        return await summarize(sql, actor.id, period, scope)
+    resources = request.app.state.resources
+    async with resources.sql() as sql:
+        group_ids = sorted(await sql.scalars(select(GroupMember.group_id).where(
+            GroupMember.user_id == actor.id, GroupMember.status == "APPROVED"))) if scope != "personal" else []
+
+    async def query(sql):
+        return await summarize(sql, actor.id, period, scope, group_ids=group_ids)
+
+    return await cached(request, ["analytics", actor.id, period, scope, today_local().isoformat(), group_ids],
+                        lambda: read_query(resources, query))
 
 
 class Prompt(BaseModel):
@@ -154,7 +188,7 @@ def local_reply(snapshot, personal):
 @router.get("/ai-chat/history")
 async def advisor_history(request: Request, actor: Actor):
     collection = request.app.state.resources.mongo.ai_chat_history
-    rows = await collection.find({"user_id": actor.id}, {"_id": 0, "user_id": 0}).sort("_id", -1).limit(50).to_list(50)
+    rows = await collection.find({"user_id": actor.id}, {"_id": 0, "user_id": 0, "created_at": 0}).sort("_id", -1).limit(50).to_list(50)
     return list(reversed(rows))
 
 
@@ -169,7 +203,7 @@ async def advisor_message(data: Prompt, request: Request, actor: Actor):
     result = {"prompt": data.text, "reply": external or text, "quick_actions": actions,
               "source": "provider" if external else "local",
               "metrics": {key: snapshot[key] for key in ("personal", "group", "overdue")}}
-    await resources.mongo.ai_chat_history.insert_one({"user_id": actor.id, **result})
+    await resources.mongo.ai_chat_history.insert_one({"user_id": actor.id, "created_at": now(), **result})
     return result
 
 
@@ -203,14 +237,21 @@ async def group_insights(group_id: int, request: Request, actor: Actor):
     month = today_local().replace(day=1)
     previous = (month - timedelta(days=1)).replace(day=1)
     following = (month + timedelta(days=32)).replace(day=1)
-    async with request.app.state.resources.sql() as sql:
+    resources = request.app.state.resources
+    async with resources.sql() as sql:
         await approved_member(sql, group_id, actor.id)
-        limit = await sql.get(GroupBudgetLimit, group_id)
-        cap = limit.monthly_limit if limit else None
-        current = GroupExpense.created_at >= utc_start(month)
-        rows = (await sql.execute(select(current, GroupExpense.category, func.sum(GroupExpense.amount)).where(
-            GroupExpense.group_id == group_id, GroupExpense.created_at >= utc_start(previous),
-            GroupExpense.created_at < utc_start(following)).group_by(current, GroupExpense.category))).all()
+
+    async def load():
+        async with resources.sql() as sql:
+            limit = await sql.get(GroupBudgetLimit, group_id)
+            current = GroupHistory.created_at >= utc_start(month)
+            rows = (await sql.execute(select(current, GroupHistory.category, func.sum(GroupHistory.amount)).where(
+                GroupHistory.group_id == group_id, GroupHistory.created_at >= utc_start(previous),
+                GroupHistory.created_at < utc_start(following)).group_by(current, GroupHistory.category))).all()
+            return {"cap": limit.monthly_limit if limit else None, "rows": [tuple(row) for row in rows]}
+
+    snapshot = await cached(request, ["group-insights", group_id, month.isoformat()], load)
+    cap, rows = snapshot["cap"], snapshot["rows"]
     categories = {category: int(total) for newest, category, total in rows if newest}
     spent = sum(categories.values())
     prior = sum(int(total) for newest, _, total in rows if not newest)

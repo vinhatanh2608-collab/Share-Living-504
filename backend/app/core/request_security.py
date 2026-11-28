@@ -39,7 +39,7 @@ class RequestSecurity:
         self.connections = {}
         self.failures = LoginCooldown(config.rate_limit_max_keys)
 
-    def retry_after(self, scope, receipt):
+    async def retry_after(self, scope, receipt, cache):
         now = monotonic()
         host = (scope.get("client") or ("unknown",))[0]
         path = scope["path"].removeprefix("/api/v1").rstrip("/")
@@ -52,9 +52,15 @@ class RequestSecurity:
                               ("advisor", self.config.ai_requests_per_hour, 3600)))
             elif receipt:
                 rules.append(("receipt", self.config.receipt_requests_per_minute, 60))
+        if scope["method"] in {"POST", "PUT", "PATCH", "DELETE"} and (
+            path.startswith(("/groups/", "/finance/", "/personal-expenses")) or path == "/groups"
+        ):
+            rules.append(("write", self.config.write_requests_per_minute, 60))
         for name, limit, window in rules:
-            subject = identity(scope) if name in {"api", "advisor", "receipt"} else host
-            wait, headers = self.limiter.check((name, window, subject), limit, window, now)
+            subject = identity(scope) if name in {"api", "advisor", "receipt", "write"} else host
+            distributed = await cache.rate(name, subject, limit, window) if cache else None
+            wait, headers = distributed if distributed is not None else self.limiter.check(
+                (name, window, subject), limit, window, now)
             if wait:
                 return wait, headers
         return 0, headers
@@ -85,9 +91,14 @@ class RequestSecurity:
 
         host = (scope.get("client") or ("unknown",))[0]
         login = scope["method"] == "POST" and scope["path"].removeprefix("/api/v1").rstrip("/") == "/auth/login"
+        cache = getattr(getattr(scope.get("app"), "state", None), "cache", None)
         rate_headers = {}
+        started = False
+
         async def secured_send(message):
+            nonlocal started
             if message["type"] == "http.response.start":
+                started = True
                 headers = MutableHeaders(scope=message)
                 if login and message["status"] in {200, 401}:
                     self.failures.record(host, message["status"], monotonic())
@@ -104,12 +115,23 @@ class RequestSecurity:
             response_headers = {**(headers or {}), **rejection_cors_headers(scope, self.config.cors_origins)}
             await JSONResponse({"detail": detail}, status_code=status, headers=response_headers)(scope, receive, secured_send)
 
+        async def process_request(body_receiver):
+            # Keep the manual backup endpoint compatible with its longer dump deadline.
+            budget = 650 if scope["path"] == "/api/v1/system/backups/run" else self.config.request_timeout_seconds
+            try:
+                async with asyncio.timeout(budget):
+                    await self.app(scope, body_receiver, secured_send)
+            except TimeoutError:
+                if started:
+                    raise
+                await reject(504, "Request processing timed out")
+
         if (production or self.config.force_https) and not secure:
             return await reject(400, "HTTPS is required")
         path = scope["path"].removeprefix("/api/v1").rstrip("/")
         receipt = is_receipt_path(path)
         if path not in {"/health/live", "/health/ready"} and scope["method"] != "OPTIONS":
-            retry, rate_headers = self.retry_after(scope, receipt)
+            retry, rate_headers = await self.retry_after(scope, receipt, cache)
             if login:
                 cooldown = self.failures.remaining(host, monotonic())
                 if cooldown > retry:
@@ -166,6 +188,6 @@ class RequestSecurity:
                 if self.slots.locked():
                     return await reject(503, "Service temporarily busy", {"Retry-After": "1"})
                 async with self.slots:
-                    return await self.app(scope, replay, secured_send)
-            return await self.app(scope, replay, secured_send)
-        return await self.app(scope, receive, secured_send)
+                    return await process_request(replay)
+            return await process_request(replay)
+        return await process_request(receive)

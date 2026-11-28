@@ -2,3 +2,10 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Local database dumps
+backups/
+backend/backups/
+*.sql
+*.sql.gz
+*.archive.gz
